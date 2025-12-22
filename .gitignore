@@ -41,3 +41,7 @@ migration_*.log
 spark-warehouse/
 metastore_db/
 derby.log
+
+# JAR files (build artifacts)
+*.jar
+!target/*.jar
