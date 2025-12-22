@@ -1,0 +1,135 @@
+package com.company.migration.yugabyte
+
+import com.company.migration.config.YugabyteConfig
+import com.company.migration.util.Logging
+import java.sql.{Connection, DriverManager, SQLException}
+
+/**
+ * Factory for creating YugabyteDB connections
+ * 
+ * CRITICAL: Uses DriverManager.getConnection() per Spark partition (NOT HikariCP)
+ * 
+ * Why no pooling?
+ * - COPY FROM STDIN is long-lived (minutes per connection)
+ * - Spark already parallelizes at partition level
+ * - COPY streams are not multiplexable (one stream = one connection)
+ * - Pooling causes classloader issues in Spark
+ * - Pooling can cause broken pipe errors when connections are evicted mid-COPY
+ * 
+ * This matches production patterns used by:
+ * - Databricks bulk loaders
+ * - Yugabyte internal loaders  
+ * - Postgres COPY tools
+ */
+class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging {
+  
+  // Store driver instance to use directly (avoids DriverManager classloader issues)
+  private val driver: java.sql.Driver = initDriver()
+  
+  private def initDriver(): java.sql.Driver = {
+    val classLoader = Thread.currentThread().getContextClassLoader
+    try {
+      // Load YugabyteDB driver only (required)
+      // CDM Pattern: Load driver using context classloader (critical for Spark)
+      val contextClassLoader = if (classLoader != null) classLoader else this.getClass.getClassLoader
+      val driverInstance = Class
+        .forName("com.yugabyte.Driver", true, contextClassLoader)
+        .getDeclaredConstructor()
+        .newInstance()
+        .asInstanceOf[java.sql.Driver]
+      
+      // CDM Pattern: Register driver with DriverManager (CRITICAL!)
+      // This ensures proper driver initialization and URL acceptance
+      DriverManager.registerDriver(driverInstance)
+      
+      logInfo("YugabyteDB JDBC Driver loaded and registered successfully")
+      driverInstance
+    } catch {
+      case e: ClassNotFoundException =>
+        logError("Failed to load YugabyteDB JDBC driver", e)
+        throw new RuntimeException(
+          "YugabyteDB JDBC driver (com.yugabyte.Driver) not found. " +
+          "Make sure jdbc-yugabytedb dependency is in classpath. " +
+          "Add to pom.xml: <dependency><groupId>com.yugabyte</groupId><artifactId>jdbc-yugabytedb</artifactId></dependency>", e)
+      case e: Exception =>
+        logError("Failed to initialize YugabyteDB JDBC driver", e)
+        throw new RuntimeException("Failed to initialize YugabyteDB JDBC driver", e)
+    }
+  }
+  
+  /**
+   * Get a connection for a Spark partition
+   * 
+   * CRITICAL: One connection per Spark partition (not pooled)
+   * This connection should be used for the entire COPY operation
+   * and closed after the partition is processed.
+   */
+  def getConnection(): Connection = {
+    val props = new java.util.Properties()
+    props.setProperty("user", yugabyteConfig.username)
+    props.setProperty("password", yugabyteConfig.password)
+    
+    // COPY-optimized properties (mandatory for performance)
+    props.setProperty("preferQueryMode", "simple")  // Avoids server-side prepare overhead
+    props.setProperty("binaryTransfer", "false")    // COPY text mode is faster & safer
+    props.setProperty("stringtype", "unspecified")  // Avoids text cast overhead
+    props.setProperty("socketTimeout", "0")        // Critical: COPY streams can run minutes
+    props.setProperty("tcpKeepAlive", "true")
+    props.setProperty("keepAlive", "true")
+    
+    // Additional COPY-optimized properties
+    props.setProperty("reWriteBatchedInserts", "true")
+    props.setProperty("connectTimeout", "10")
+    props.setProperty("loginTimeout", "10")
+    
+    // Ensure JDBC URL uses jdbc:yugabytedb:// format (required for YugabyteDB driver)
+    // CDM Pattern: Always use jdbc:yugabytedb:// format
+    val jdbcUrl = if (yugabyteConfig.jdbcUrl.startsWith("jdbc:postgresql://")) {
+      // Convert PostgreSQL URL format to YugabyteDB format
+      yugabyteConfig.jdbcUrl.replace("jdbc:postgresql://", "jdbc:yugabytedb://")
+    } else {
+      yugabyteConfig.jdbcUrl
+    }
+    
+    // CDM Pattern: Verify driver accepts URL before connecting
+    if (!driver.acceptsURL(jdbcUrl)) {
+      throw new SQLException(s"YugabyteDB driver does not accept URL: $jdbcUrl. Ensure URL uses jdbc:yugabytedb:// format.")
+    }
+    
+    // Use DriverManager.getConnection() - driver is pre-registered
+    // This matches production pattern and works correctly with Spark classloader
+    val conn = DriverManager.getConnection(jdbcUrl, props)
+    
+    // Set transaction isolation and auto-commit
+    conn.setTransactionIsolation(getIsolationLevel(yugabyteConfig.isolationLevel))
+    conn.setAutoCommit(yugabyteConfig.autoCommit)
+    
+    logDebug(s"Created new connection for partition: ${conn.getClass.getSimpleName}")
+    conn
+  }
+  
+  /**
+   * Get a direct connection (for testing or single-use)
+   * Same as getConnection() but explicitly documented
+   */
+  def getDirectConnection(): Connection = {
+    getConnection()
+  }
+  
+  /**
+   * Close method (no-op since we don't use pooling)
+   * Connections are closed by callers after use
+   */
+  def close(): Unit = {
+    logDebug("YugabyteConnectionFactory.close() called (no-op, no pooling)")
+  }
+  
+  private def getIsolationLevel(level: String): Int = {
+    level.toUpperCase match {
+      case "READ_COMMITTED" => Connection.TRANSACTION_READ_COMMITTED
+      case "REPEATABLE_READ" => Connection.TRANSACTION_REPEATABLE_READ
+      case "SERIALIZABLE" => Connection.TRANSACTION_SERIALIZABLE
+      case _ => Connection.TRANSACTION_READ_COMMITTED
+    }
+  }
+}
