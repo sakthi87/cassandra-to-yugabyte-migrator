@@ -54,8 +54,8 @@ object MainApp extends Logging {
         None
       }
       
-      // Initialize metrics
-      val metrics = new Metrics()
+              // Initialize metrics (requires SparkContext for accumulators)
+              val metrics = new Metrics(spark.sparkContext)
       
       try {
         // Check if table configuration exists
