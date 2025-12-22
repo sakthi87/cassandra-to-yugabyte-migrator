@@ -83,10 +83,16 @@ object YugabyteConfig {
   private def buildJdbcParams(props: Properties): String = {
     val params = scala.collection.mutable.ListBuffer[String]()
     
-    // Load balancing (critical for multi-node)
+    // Load balancing (works for single region without topology keys)
+    // Topology keys are only needed for multi-region/stretch clusters
     val loadBalance = props.getProperty("yugabyte.loadBalanceHosts", "true").toBoolean
     if (loadBalance) {
       params += "loadBalance=true"
+      // Only add topologyKeys if explicitly configured (for multi-region)
+      val topologyKeys = props.getProperty("yugabyte.topologyKeys", "")
+      if (topologyKeys.nonEmpty) {
+        params += s"topologyKeys=$topologyKeys"
+      }
     }
     
     // COPY-optimized properties (mandatory for performance)
@@ -104,11 +110,7 @@ object YugabyteConfig {
     params += "tcpKeepAlive=true"
     params += "keepAlive=true"
     
-    // Topology keys (optional, for stretch clusters)
-    val topologyKeys = props.getProperty("yugabyte.topologyKeys", "")
-    if (topologyKeys.nonEmpty) {
-      params += s"topologyKeys=$topologyKeys"
-    }
+    // Note: topologyKeys already handled above in loadBalance section
     
     params.mkString("&")
   }

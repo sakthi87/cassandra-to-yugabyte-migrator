@@ -19,8 +19,20 @@ object ConfigLoader {
     logger.info(s"Loading configuration from: $propertiesPath")
     
     val props = new Properties()
-    val inputStream: InputStream = Option(getClass.getClassLoader.getResourceAsStream(propertiesPath))
-      .getOrElse(throw new IllegalArgumentException(s"Properties file not found: $propertiesPath"))
+    
+    // Try to load from file system first (for external properties file)
+    val file = new java.io.File(propertiesPath)
+    val inputStream: InputStream = if (file.exists() && file.isFile) {
+      logger.info(s"Loading properties from file system: ${file.getAbsolutePath}")
+      new java.io.FileInputStream(file)
+    } else {
+      // Fall back to classpath resource
+      logger.info(s"Loading properties from classpath: $propertiesPath")
+      Option(getClass.getClassLoader.getResourceAsStream(propertiesPath))
+        .getOrElse(throw new IllegalArgumentException(
+          s"Properties file not found: $propertiesPath (checked file system and classpath)"
+        ))
+    }
     
     try {
       props.load(inputStream)
@@ -34,7 +46,7 @@ object ConfigLoader {
         }
       }
       
-      logger.info("Configuration loaded successfully")
+      logger.info(s"Configuration loaded successfully (${props.size()} properties)")
       props
     } finally {
       inputStream.close()

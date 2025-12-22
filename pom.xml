@@ -21,7 +21,7 @@
         <java-driver.version>4.19.0</java-driver.version>
         <postgresql.version>42.7.3</postgresql.version>
         <yugabyte-jdbc.version>42.7.3-yb-4</yugabyte-jdbc.version>
-        <hikaricp.version>5.0.1</hikaricp.version>
+        <!-- HikariCP removed - not used in new codebase (direct connections instead) -->
         <log4j.version>2.25.1</log4j.version>
         <slf4j.version>2.0.16</slf4j.version>
         <junit.version>5.9.1</junit.version>
@@ -92,12 +92,8 @@
             <version>${postgresql.version}</version>
         </dependency>
 
-        <!-- HikariCP Connection Pool -->
-        <dependency>
-            <groupId>com.zaxxer</groupId>
-            <artifactId>HikariCP</artifactId>
-            <version>${hikaricp.version}</version>
-        </dependency>
+        <!-- HikariCP REMOVED - New codebase uses direct connections per partition -->
+        <!-- This eliminates "too many clients" errors by avoiding connection pooling -->
 
 
         <!-- Logging -->
