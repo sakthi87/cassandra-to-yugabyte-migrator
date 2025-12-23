@@ -227,6 +227,426 @@ spark.default.parallelism=32
 → Higher throughput
 ```
 
+## Memory Impact of Increased Parallelism
+
+### How Parallelism Affects Memory
+
+**Key Concept**: More parallelism = More concurrent operations = More memory usage
+
+### Memory Components Per Partition
+
+Each Spark partition (and thus each YugabyteDB connection) uses memory for:
+
+1. **Row Buffer** (in `CopyWriter`):
+   - Buffer size: `yugabyte.copyBufferSize` (default: 100,000 rows)
+   - Memory per buffer: ~10-50MB (depends on row size)
+   - Example: 100K rows × 500 bytes/row = ~50MB per partition
+
+2. **CSV Encoding Buffer**:
+   - Temporary memory for CSV conversion
+   - ~5-10MB per partition
+
+3. **Spark Task Memory**:
+   - Spark execution memory per task
+   - ~100-200MB per task (default)
+
+4. **Connection Overhead**:
+   - JDBC connection buffers
+   - ~1-5MB per connection
+
+**Total per partition**: ~150-300MB (varies by row size and buffer settings)
+
+### Memory Calculation
+
+#### Formula
+
+```
+Total Memory Needed = 
+  (Memory per Partition × Number of Partitions) + 
+  Driver Memory + 
+  Overhead
+```
+
+#### Example Calculations
+
+**Configuration 1: parallelism=16**
+```
+Memory per partition: ~200MB
+Number of partitions: 16
+Executor memory needed: 16 × 200MB = 3.2GB
+Recommended executor.memory: 4-6GB (with overhead)
+```
+
+**Configuration 2: parallelism=32**
+```
+Memory per partition: ~200MB
+Number of partitions: 32
+Executor memory needed: 32 × 200MB = 6.4GB
+Recommended executor.memory: 8-12GB (with overhead)
+```
+
+**Configuration 3: parallelism=64**
+```
+Memory per partition: ~200MB
+Number of partitions: 64
+Executor memory needed: 64 × 200MB = 12.8GB
+Recommended executor.memory: 16-20GB (with overhead)
+```
+
+### Memory Configuration Parameters
+
+#### 1. Executor Memory (`spark.executor.memory`)
+
+**Purpose**: Total memory available to each executor
+
+**Formula**:
+```
+spark.executor.memory = 
+  (spark.default.parallelism / spark.executor.instances) × 
+  Memory per partition × 
+  Safety factor (1.5-2x)
+```
+
+**Examples**:
+
+| Parallelism | Executor Instances | Partitions per Executor | Recommended Memory |
+|-------------|-------------------|------------------------|-------------------|
+| 16          | 4                 | 4                      | 4-6GB             |
+| 32          | 8                 | 4                      | 8-12GB            |
+| 32          | 4                 | 8                      | 12-16GB           |
+| 64          | 8                 | 8                      | 16-24GB           |
+
+#### 2. Executor Memory Overhead (`spark.executor.memoryOverhead`)
+
+**Purpose**: Memory for JVM overhead, native libraries, etc.
+
+**Default**: `max(executor.memory × 0.1, 384MB)`
+
+**Recommended**: 
+```properties
+spark.executor.memoryOverhead=2048m  # For 8GB+ executor memory
+```
+
+**Total Memory per Executor** = `executor.memory` + `executor.memoryOverhead`
+
+#### 3. Driver Memory (`spark.driver.memory`)
+
+**Purpose**: Memory for Spark driver (coordinator)
+
+**Recommended**:
+```properties
+spark.driver.memory=4g  # For most workloads
+spark.driver.memory=8g  # For large datasets or many partitions
+```
+
+#### 4. Memory Fraction (`spark.memory.fraction`)
+
+**Purpose**: Fraction of executor memory for execution (vs storage)
+
+**Default**: 0.6
+
+**Recommended for COPY workloads**:
+```properties
+spark.memory.fraction=0.8  # More memory for execution (COPY operations)
+spark.memory.storageFraction=0.2  # Less for caching
+```
+
+**Why**: COPY operations are execution-heavy, not storage-heavy
+
+### Memory Matching Strategy
+
+#### Step 1: Determine Target Parallelism
+
+Based on performance needs:
+- **Low latency environment**: parallelism = 16-32
+- **High latency environment**: parallelism = 32-64
+- **Very high latency**: parallelism = 64-128
+
+#### Step 2: Calculate Partitions per Executor
+
+```
+Partitions per Executor = spark.default.parallelism / spark.executor.instances
+```
+
+**Target**: 4-8 partitions per executor (optimal range)
+
+#### Step 3: Calculate Memory per Executor
+
+```
+Memory per Executor = 
+  Partitions per Executor × 
+  Memory per Partition (200-300MB) × 
+  Safety Factor (1.5-2x)
+```
+
+#### Step 4: Configure Spark
+
+```properties
+spark.executor.instances=8
+spark.executor.cores=4
+spark.executor.memory=8g
+spark.executor.memoryOverhead=2048m
+spark.driver.memory=4g
+spark.memory.fraction=0.8
+spark.memory.storageFraction=0.2
+```
+
+### Real-World Examples
+
+#### Example 1: Small Dataset (97K records)
+
+**Target**: 32 parallelism for remote environment
+
+**Configuration**:
+```properties
+spark.default.parallelism=32
+spark.executor.instances=8
+spark.executor.cores=4
+spark.executor.memory=8g
+spark.executor.memoryOverhead=2048m
+spark.driver.memory=4g
+```
+
+**Memory Check**:
+- Partitions per executor: 32 / 8 = 4
+- Memory per partition: ~200MB
+- Needed per executor: 4 × 200MB × 1.5 = 1.2GB
+- Configured: 8GB ✅ (plenty of headroom)
+
+#### Example 2: Large Dataset (25M records)
+
+**Target**: 64 parallelism for high throughput
+
+**Configuration**:
+```properties
+spark.default.parallelism=64
+spark.executor.instances=8
+spark.executor.cores=8
+spark.executor.memory=16g
+spark.executor.memoryOverhead=4096m
+spark.driver.memory=8g
+```
+
+**Memory Check**:
+- Partitions per executor: 64 / 8 = 8
+- Memory per partition: ~250MB (larger rows)
+- Needed per executor: 8 × 250MB × 1.5 = 3GB
+- Configured: 16GB ✅ (good headroom)
+
+#### Example 3: Memory-Constrained Environment
+
+**Constraint**: Only 32GB total memory available
+
+**Strategy**: Reduce parallelism or increase executor instances
+
+**Option A: Lower Parallelism**
+```properties
+spark.default.parallelism=32
+spark.executor.instances=4
+spark.executor.memory=8g
+# Total: 4 × 8GB = 32GB ✅
+```
+
+**Option B: More Executors, Less Memory Each**
+```properties
+spark.default.parallelism=32
+spark.executor.instances=8
+spark.executor.memory=4g
+# Total: 8 × 4GB = 32GB ✅
+```
+
+**Trade-off**: Option B has more overhead but better fault tolerance
+
+### Memory Monitoring
+
+#### During Migration
+
+**Check Executor Memory Usage**:
+```bash
+# Spark UI: http://<driver>:4040
+# Go to Executors tab
+# Check: Memory Used / Memory Total
+```
+
+**Target**: 60-80% memory usage (healthy)
+**Warning**: >90% usage = risk of OOM
+
+#### Check Memory Pressure
+
+**Signs of Memory Pressure**:
+- Frequent GC pauses
+- Task failures with OOM errors
+- Slow performance
+- High memory usage in Spark UI
+
+**Solutions**:
+1. Increase `spark.executor.memory`
+2. Increase `spark.executor.memoryOverhead`
+3. Reduce `spark.default.parallelism`
+4. Reduce `yugabyte.copyBufferSize` (smaller buffers)
+
+### Balancing Parallelism vs Memory
+
+#### Decision Matrix
+
+| Scenario | Parallelism | Memory per Executor | Executor Instances |
+|----------|-------------|-------------------|-------------------|
+| Low memory, low latency | 16 | 4GB | 4 |
+| Low memory, high latency | 32 | 4GB | 8 |
+| High memory, low latency | 32 | 8GB | 4 |
+| High memory, high latency | 64 | 16GB | 8 |
+| Very high memory | 128 | 32GB | 4-8 |
+
+#### Rule of Thumb
+
+**For Remote/High Latency**:
+```
+spark.default.parallelism = 32-64
+spark.executor.memory = 8-16GB
+spark.executor.instances = 4-8
+```
+
+**Memory Formula**:
+```
+spark.executor.memory ≥ (parallelism / executor.instances) × 300MB × 1.5
+```
+
+### Configuration Template
+
+#### For 32 Parallelism (Recommended for Remote)
+
+```properties
+# Parallelism
+spark.default.parallelism=32
+spark.sql.shuffle.partitions=32
+
+# Executors
+spark.executor.instances=8
+spark.executor.cores=4
+spark.executor.memory=8g
+spark.executor.memoryOverhead=2048m
+
+# Driver
+spark.driver.memory=4g
+
+# Memory Management
+spark.memory.fraction=0.8
+spark.memory.storageFraction=0.2
+
+# COPY Buffer (affects memory per partition)
+yugabyte.copyBufferSize=50000
+yugabyte.copyFlushEvery=25000
+```
+
+**Memory Calculation**:
+- Partitions per executor: 32 / 8 = 4
+- Memory per partition: ~200MB (with 50K buffer)
+- Needed: 4 × 200MB × 1.5 = 1.2GB
+- Configured: 8GB ✅ (6.7x headroom)
+
+#### For 64 Parallelism (High Throughput)
+
+```properties
+# Parallelism
+spark.default.parallelism=64
+spark.sql.shuffle.partitions=64
+
+# Executors
+spark.executor.instances=8
+spark.executor.cores=8
+spark.executor.memory=16g
+spark.executor.memoryOverhead=4096m
+
+# Driver
+spark.driver.memory=8g
+
+# Memory Management
+spark.memory.fraction=0.8
+spark.memory.storageFraction=0.2
+
+# COPY Buffer
+yugabyte.copyBufferSize=50000
+yugabyte.copyFlushEvery=25000
+```
+
+**Memory Calculation**:
+- Partitions per executor: 64 / 8 = 8
+- Memory per partition: ~200MB
+- Needed: 8 × 200MB × 1.5 = 2.4GB
+- Configured: 16GB ✅ (6.7x headroom)
+
+### Troubleshooting Memory Issues
+
+#### Out of Memory (OOM) Errors
+
+**Symptoms**:
+```
+java.lang.OutOfMemoryError: Java heap space
+ExecutorLostFailure: Executor exited
+```
+
+**Solutions**:
+1. **Increase executor memory**:
+   ```properties
+   spark.executor.memory=16g  # Increase from 8g
+   ```
+
+2. **Increase memory overhead**:
+   ```properties
+   spark.executor.memoryOverhead=4096m  # Increase from 2048m
+   ```
+
+3. **Reduce parallelism**:
+   ```properties
+   spark.default.parallelism=32  # Reduce from 64
+   ```
+
+4. **Reduce buffer size**:
+   ```properties
+   yugabyte.copyBufferSize=25000  # Reduce from 50000
+   ```
+
+#### High Memory Usage but No OOM
+
+**Symptoms**: Memory usage >90% but no errors
+
+**Solutions**:
+1. Monitor GC pauses (if frequent, increase memory)
+2. Check for memory leaks (unlikely in this codebase)
+3. Increase memory for safety margin
+
+### Summary: Memory and Parallelism
+
+**The Relationship**:
+```
+spark.default.parallelism
+  ↓
+Number of partitions
+  ↓
+Memory needed = Partitions × Memory per partition
+  ↓
+spark.executor.memory must be ≥ Memory needed × Safety factor
+```
+
+**Key Formulas**:
+1. **Partitions per Executor** = `parallelism / executor.instances`
+2. **Memory per Partition** = ~200-300MB (depends on buffer size)
+3. **Required Memory** = `Partitions per Executor × Memory per Partition × 1.5`
+4. **Configured Memory** = `spark.executor.memory` (should be ≥ Required)
+
+**Recommended Configurations**:
+
+| Parallelism | Executor Instances | Executor Memory | Total Memory |
+|-------------|-------------------|-----------------|--------------|
+| 16          | 4                 | 4-6GB           | 16-24GB      |
+| 32          | 8                 | 8-12GB          | 64-96GB      |
+| 64          | 8                 | 16-24GB         | 128-192GB    |
+
+**For Your Case (97K records, remote environment)**:
+- **Recommended**: parallelism=32, executor.instances=8, executor.memory=8GB
+- **Total Memory**: ~64GB (8 executors × 8GB)
+- **Memory Check**: 32 partitions / 8 executors = 4 partitions/executor × 200MB × 1.5 = 1.2GB needed, 8GB configured ✅
+
 ## Summary
 
 **The Relationship**:
@@ -242,15 +662,32 @@ Number of concurrent COPY streams
 Throughput
 ```
 
+**Memory Impact**:
+```
+spark.default.parallelism
+  ↓
+Number of partitions
+  ↓
+Memory needed = Partitions × Memory per partition
+  ↓
+spark.executor.memory must match
+```
+
 **Why It Works**:
 - More parallelism = More concurrent connections
 - More connections = More concurrent COPY streams
 - More streams = Better latency hiding
 - Better latency hiding = Higher throughput
+- **But**: More parallelism = More memory needed
 
 **For Your Case**:
-- Current: 16 parallelism → 16 connections → 3.3K records/sec
-- Optimized: 32 parallelism → 32 connections → 6-7K records/sec (expected)
+- Current: 16 parallelism → 16 connections → 3.3K records/sec → ~3.2GB memory needed
+- Optimized: 32 parallelism → 32 connections → 6-7K records/sec (expected) → ~6.4GB memory needed
+- **Memory Config**: 8 executors × 8GB = 64GB total (plenty of headroom)
 
-**Important**: Each connection is independent and processes one partition. More partitions = more connections = more concurrent work.
+**Important**: 
+- Each connection is independent and processes one partition
+- More partitions = more connections = more concurrent work
+- **But** more partitions = more memory needed
+- Always match `spark.executor.memory` to parallelism requirements
 
