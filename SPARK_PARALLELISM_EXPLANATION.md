@@ -229,9 +229,39 @@ spark.default.parallelism=32
 
 ## Memory Impact of Increased Parallelism
 
+### Important Clarifications (Read First!)
+
+⚠️ **Critical Understanding**:
+
+1. **Memory pressure is PER EXECUTOR**, not cluster-wide
+   - Parallelism increases memory pressure per executor, not total cluster memory
+   - Formula: `Memory per executor = (parallelism / executors) × memory per partition`
+
+2. **Concurrent tasks per executor** is what really matters
+   - Limited by `spark.executor.cores`, not parallelism
+   - Only `executor.cores` tasks run simultaneously per executor
+   - Formula: `Memory per executor ≈ executor.cores × memory_per_task × safety_factor`
+
+3. **Effective parallelism may be limited by Cassandra**
+   - Cassandra Spark Connector often overrides parallelism
+   - Actual partitions = min(requested parallelism, Cassandra token splits)
+   - Token splits depend on: `spark.cassandra.input.split.size_in_mb`, cluster topology
+
+4. **Memory per partition is workload-specific**
+   - The 200-300MB figure is for **this specific workload** (Cassandra → CSV → COPY)
+   - Depends on: row width, null density, string columns, collection types, COPY buffer size
+   - **Not a universal constant** for all Spark jobs
+
+5. **COPY buffer size directly affects memory**
+   - `yugabyte.copyBufferSize` (e.g., 50,000 rows) = main memory consumer
+   - Increasing buffer size = linear increase in memory usage
+   - Formula: `Buffer memory = copyBufferSize × avg_row_size`
+
 ### How Parallelism Affects Memory
 
-**Key Concept**: More parallelism = More concurrent operations = More memory usage
+**Key Concept**: More parallelism = More concurrent operations = More memory usage **per executor**
+
+**Important**: Memory pressure is driven by **concurrent tasks per executor** (limited by `executor.cores`), not total parallelism.
 
 ### Memory Components Per Partition
 
@@ -256,7 +286,36 @@ Each Spark partition (and thus each YugabyteDB connection) uses memory for:
 
 **Total per partition**: ~150-300MB (varies by row size and buffer settings)
 
+**Note**: This is a **workload-specific estimate** for:
+- Cassandra rows → CSV transformation → COPY streaming
+- Typical row width (10-50 columns)
+- COPY buffer size: 50,000 rows (configurable via `yugabyte.copyBufferSize`)
+
+**For different workloads**, memory per partition can vary significantly:
+- Narrow tables (5 columns): ~100-150MB
+- Wide tables (100+ columns): ~400-600MB
+- Large collections/JSON: ~500MB-1GB+
+
 ### Memory Calculation
+
+#### The Correct Formula
+
+**Memory pressure is PER EXECUTOR**, not cluster-wide:
+
+```
+Memory per Executor = 
+  Concurrent Tasks per Executor × 
+  Memory per Task × 
+  Safety Factor
+
+Where:
+  Concurrent Tasks per Executor = min(executor.cores, tasks_per_executor)
+  Tasks per Executor = parallelism / executor.instances
+  Memory per Task ≈ 200-300MB (workload-specific)
+  Safety Factor = 1.5-2x
+```
+
+**Key Insight**: Only `executor.cores` tasks run **simultaneously** per executor, even if parallelism is higher.
 
 #### Formula
 
@@ -269,29 +328,37 @@ Total Memory Needed =
 
 #### Example Calculations
 
-**Configuration 1: parallelism=16**
+**Configuration 1: parallelism=16, executors=4, cores=4**
 ```
-Memory per partition: ~200MB
-Number of partitions: 16
-Executor memory needed: 16 × 200MB = 3.2GB
+Partitions per executor: 16 / 4 = 4
+Concurrent tasks per executor: min(4 cores, 4 partitions) = 4
+Memory per task: ~200MB
+Memory per executor: 4 × 200MB × 1.5 = 1.2GB
 Recommended executor.memory: 4-6GB (with overhead)
+Total cluster memory: 4 × 6GB = 24GB
 ```
 
-**Configuration 2: parallelism=32**
+**Configuration 2: parallelism=32, executors=8, cores=4**
 ```
-Memory per partition: ~200MB
-Number of partitions: 32
-Executor memory needed: 32 × 200MB = 6.4GB
+Partitions per executor: 32 / 8 = 4
+Concurrent tasks per executor: min(4 cores, 4 partitions) = 4
+Memory per task: ~200MB
+Memory per executor: 4 × 200MB × 1.5 = 1.2GB
 Recommended executor.memory: 8-12GB (with overhead)
+Total cluster memory: 8 × 8GB = 64GB
 ```
 
-**Configuration 3: parallelism=64**
+**Configuration 3: parallelism=64, executors=8, cores=8**
 ```
-Memory per partition: ~200MB
-Number of partitions: 64
-Executor memory needed: 64 × 200MB = 12.8GB
-Recommended executor.memory: 16-20GB (with overhead)
+Partitions per executor: 64 / 8 = 8
+Concurrent tasks per executor: min(8 cores, 8 partitions) = 8
+Memory per task: ~200MB
+Memory per executor: 8 × 200MB × 1.5 = 2.4GB
+Recommended executor.memory: 16-24GB (with overhead)
+Total cluster memory: 8 × 16GB = 128GB
 ```
+
+**Key Point**: Memory pressure is **per executor**, not total. More executors = more total memory, but same pressure per executor.
 
 ### Memory Configuration Parameters
 
@@ -299,12 +366,26 @@ Recommended executor.memory: 16-20GB (with overhead)
 
 **Purpose**: Total memory available to each executor
 
-**Formula**:
+**Correct Formula** (emphasizing concurrent tasks):
+```
+spark.executor.memory = 
+  executor.cores × 
+  Memory per task × 
+  Safety factor (1.5-2x)
+
+Where:
+  Memory per task ≈ 200-300MB (workload-specific)
+  executor.cores = concurrent tasks per executor (the real limit)
+```
+
+**Alternative Formula** (using parallelism):
 ```
 spark.executor.memory = 
   (spark.default.parallelism / spark.executor.instances) × 
   Memory per partition × 
   Safety factor (1.5-2x)
+
+But note: Only min(executor.cores, partitions_per_executor) tasks run concurrently
 ```
 
 **Examples**:
@@ -368,16 +449,39 @@ Based on performance needs:
 Partitions per Executor = spark.default.parallelism / spark.executor.instances
 ```
 
+**Important**: Actual partitions may be limited by Cassandra token splits:
+```
+Effective Partitions = min(
+  spark.default.parallelism,
+  Cassandra token splits (based on split.size_in_mb)
+)
+```
+
 **Target**: 4-8 partitions per executor (optimal range)
+
+**Note**: Only `executor.cores` tasks run **concurrently** per executor, even with more partitions.
 
 #### Step 3: Calculate Memory per Executor
 
+**Correct Formula** (emphasizing concurrent tasks):
+```
+Memory per Executor = 
+  min(executor.cores, Partitions per Executor) × 
+  Memory per Task (200-300MB) × 
+  Safety Factor (1.5-2x)
+```
+
+**Why**: Only `executor.cores` tasks run simultaneously, even if there are more partitions.
+
+**Alternative** (simpler, but less precise):
 ```
 Memory per Executor = 
   Partitions per Executor × 
   Memory per Partition (200-300MB) × 
   Safety Factor (1.5-2x)
 ```
+
+**Note**: This assumes partitions per executor ≤ executor.cores (which is typical).
 
 #### Step 4: Configure Spark
 
@@ -409,9 +513,10 @@ spark.driver.memory=4g
 
 **Memory Check**:
 - Partitions per executor: 32 / 8 = 4
-- Memory per partition: ~200MB
+- Concurrent tasks per executor: min(4 cores, 4 partitions) = 4
+- Memory per task: ~200MB
 - Needed per executor: 4 × 200MB × 1.5 = 1.2GB
-- Configured: 8GB ✅ (plenty of headroom)
+- Configured: 8GB ✅ (6.7x headroom - excellent)
 
 #### Example 2: Large Dataset (25M records)
 
@@ -429,9 +534,10 @@ spark.driver.memory=8g
 
 **Memory Check**:
 - Partitions per executor: 64 / 8 = 8
-- Memory per partition: ~250MB (larger rows)
+- Concurrent tasks per executor: min(8 cores, 8 partitions) = 8
+- Memory per task: ~250MB (larger rows)
 - Needed per executor: 8 × 250MB × 1.5 = 3GB
-- Configured: 16GB ✅ (good headroom)
+- Configured: 16GB ✅ (5.3x headroom - good)
 
 #### Example 3: Memory-Constrained Environment
 
@@ -533,16 +639,19 @@ spark.driver.memory=4g
 spark.memory.fraction=0.8
 spark.memory.storageFraction=0.2
 
-# COPY Buffer (affects memory per partition)
-yugabyte.copyBufferSize=50000
+# COPY Buffer (affects memory per partition - CRITICAL!)
+yugabyte.copyBufferSize=50000  # Main memory consumer per partition
 yugabyte.copyFlushEvery=25000
 ```
 
 **Memory Calculation**:
 - Partitions per executor: 32 / 8 = 4
-- Memory per partition: ~200MB (with 50K buffer)
+- Concurrent tasks per executor: min(4 cores, 4 partitions) = 4
+- Memory per task: ~200MB (with 50K buffer = ~100MB buffer + 100MB overhead)
 - Needed: 4 × 200MB × 1.5 = 1.2GB
 - Configured: 8GB ✅ (6.7x headroom)
+
+**Note**: If you increase `yugabyte.copyBufferSize` to 100,000, memory per task increases to ~300MB, and needed memory becomes 1.8GB (still safe with 8GB).
 
 #### For 64 Parallelism (High Throughput)
 
@@ -571,7 +680,8 @@ yugabyte.copyFlushEvery=25000
 
 **Memory Calculation**:
 - Partitions per executor: 64 / 8 = 8
-- Memory per partition: ~200MB
+- Concurrent tasks per executor: min(8 cores, 8 partitions) = 8
+- Memory per task: ~200MB
 - Needed: 8 × 200MB × 1.5 = 2.4GB
 - Configured: 16GB ✅ (6.7x headroom)
 
@@ -596,14 +706,22 @@ ExecutorLostFailure: Executor exited
    spark.executor.memoryOverhead=4096m  # Increase from 2048m
    ```
 
-3. **Reduce parallelism**:
+3. **Reduce concurrent tasks** (most effective):
+   ```properties
+   spark.executor.cores=4  # Reduce from 8 (reduces concurrent tasks)
+   # OR
+   spark.executor.instances=16  # More executors, fewer tasks each
+   ```
+
+4. **Reduce parallelism** (less effective if cores are the limit):
    ```properties
    spark.default.parallelism=32  # Reduce from 64
    ```
 
-4. **Reduce buffer size**:
+5. **Reduce COPY buffer size** (direct impact):
    ```properties
    yugabyte.copyBufferSize=25000  # Reduce from 50000
+   # This directly reduces memory per task
    ```
 
 #### High Memory Usage but No OOM
@@ -629,10 +747,24 @@ spark.executor.memory must be ≥ Memory needed × Safety factor
 ```
 
 **Key Formulas**:
+
 1. **Partitions per Executor** = `parallelism / executor.instances`
-2. **Memory per Partition** = ~200-300MB (depends on buffer size)
-3. **Required Memory** = `Partitions per Executor × Memory per Partition × 1.5`
-4. **Configured Memory** = `spark.executor.memory` (should be ≥ Required)
+   - **Note**: May be limited by Cassandra token splits
+
+2. **Concurrent Tasks per Executor** = `min(executor.cores, partitions_per_executor)`
+   - **This is what really matters** for memory pressure
+
+3. **Memory per Task** = ~200-300MB (workload-specific, depends on):
+   - Row width (columns)
+   - `yugabyte.copyBufferSize` (main factor)
+   - Null density
+   - Collection/JSON types
+
+4. **Required Memory per Executor** = `Concurrent Tasks × Memory per Task × 1.5`
+   - **Correct formula** (emphasizes concurrent tasks)
+   - Alternative: `Partitions per Executor × Memory per Partition × 1.5` (simpler, assumes partitions ≤ cores)
+
+5. **Configured Memory** = `spark.executor.memory` (should be ≥ Required)
 
 **Recommended Configurations**:
 
@@ -668,9 +800,13 @@ spark.default.parallelism
   ↓
 Number of partitions
   ↓
-Memory needed = Partitions × Memory per partition
+Partitions per executor = parallelism / executor.instances
   ↓
-spark.executor.memory must match
+Concurrent tasks per executor = min(executor.cores, partitions_per_executor)
+  ↓
+Memory needed per executor = Concurrent tasks × Memory per task
+  ↓
+spark.executor.memory must match (per executor, not cluster-wide)
 ```
 
 **Why It Works**:
