@@ -90,16 +90,19 @@ object MainApp extends Logging {
         migrationJob.execute()
         
         // Validate if enabled
+        // CDM Pattern: Use migration metrics instead of COUNT queries (avoids timeout)
         if (validationEnabled && tableConfig.validate) {
-          logInfo("Running validation...")
+          logWarn("Running validation using migration metrics (no COUNT queries)...")
           
-          val rowCountValidator = new RowCountValidator(spark, cassandraConfig, yugabyteConfig)
-          val (cassandraCount, yugabyteCount, matchResult) = rowCountValidator.validateRowCount(tableConfig)
+          // Use metrics-based validation (no COUNT queries - avoids timeout on distributed DBs)
+          val rowCountValidator = new RowCountValidator(metrics)
+          val (rowsRead, rowsWritten, matchResult) = rowCountValidator.validateRowCount(tableConfig)
           
           if (!matchResult) {
-            logWarn(s"Row count mismatch: Cassandra=$cassandraCount, Yugabyte=$yugabyteCount")
+            logWarn(s"Row count validation mismatch: Read=$rowsRead, Written=$rowsWritten")
+            logWarn("  This may indicate write failures or skipped rows. Check error logs.")
           } else {
-            logInfo("Row count validation passed")
+            logWarn(s"Row count validation passed: $rowsWritten rows migrated successfully")
           }
           
           // Optional: Checksum validation
