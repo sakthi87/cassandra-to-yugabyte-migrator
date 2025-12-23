@@ -18,23 +18,35 @@ object DataTypeConverter {
   /**
    * Convert a value to its string representation for CSV
    * Handles nulls, UUIDs, timestamps, collections, etc.
+   * 
+   * CRITICAL: This method should NOT be called with null values.
+   * Use row.isNullAt() to check for nulls before calling this method.
+   * This ensures proper handling of:
+   * - NULL values (empty string in CSV)
+   * - Empty strings ("")
+   * - Whitespace-only strings ("   ")
+   * - Non-ASCII characters
    */
   def convertToString(value: Any, dataType: DataType): String = {
+    // This should only be called with non-null values
+    // Null checking is done in RowTransformer using row.isNullAt()
     if (value == null) {
-      "" // Empty string for NULL in CSV
-    } else {
-      dataType match {
-        case StringType => value.toString
-        case IntegerType => value.toString
-        case LongType => value.toString
-        case DoubleType => value.toString
-        case FloatType => value.toString
-        case BooleanType => value.toString
-        case TimestampType => convertTimestamp(value)
-        case DateType => value.toString
-        case BinaryType => convertBinary(value)
-        case _ => convertComplexType(value, dataType)
-      }
+      throw new IllegalArgumentException("convertToString should not be called with null. Use row.isNullAt() to check for nulls first.")
+    }
+    
+    dataType match {
+      case StringType => 
+        // Preserve the exact string value, including spaces and non-ASCII characters
+        value.toString
+      case IntegerType => value.toString
+      case LongType => value.toString
+      case DoubleType => value.toString
+      case FloatType => value.toString
+      case BooleanType => value.toString
+      case TimestampType => convertTimestamp(value)
+      case DateType => value.toString
+      case BinaryType => convertBinary(value)
+      case _ => convertComplexType(value, dataType)
     }
   }
   

@@ -21,10 +21,14 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
         val sourceCol = SchemaMapper.getSourceColumnName(targetCol, tableConfig)
         val fieldIndex = sourceSchema.fieldIndex(sourceCol)
         val dataType = sourceSchema.fields(fieldIndex).dataType
-        val value = row.get(fieldIndex)
+        
+        // CRITICAL: Check if value is null using Spark's isNullAt (not Java null check)
+        // This correctly handles null values vs empty strings vs whitespace-only strings
+        val isNull = row.isNullAt(fieldIndex)
+        val value = if (isNull) null else row.get(fieldIndex)
         
         val stringValue = DataTypeConverter.convertToString(value, dataType)
-        escapeCsvField(stringValue)
+        escapeCsvField(stringValue, isNull)
       }
       
       Some(values.mkString(","))
@@ -37,30 +41,50 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
   
   /**
    * Escape a CSV field according to PostgreSQL CSV format rules
+   * - NULL values: Empty string (as per yugabyte.csvNull=)
+   * - Empty strings: Must be quoted to distinguish from NULL
+   * - Whitespace-only strings: Must be quoted to preserve whitespace
    * - Fields containing delimiter, quote, or newline must be quoted
    * - Fields with leading/trailing whitespace should be quoted
    * - Quotes within quoted fields are escaped by doubling
+   * - Non-ASCII characters: Must be properly UTF-8 encoded and quoted if needed
    */
-  private def escapeCsvField(field: String): String = {
+  private def escapeCsvField(field: String, isNull: Boolean): String = {
+    // CRITICAL: NULL values become empty string (PostgreSQL COPY NULL representation)
+    if (isNull) {
+      return "" // Empty string represents NULL in CSV
+    }
+    
+    // CRITICAL: Empty strings must be quoted to distinguish from NULL
+    // PostgreSQL COPY treats unquoted empty string as NULL
     if (field.isEmpty) {
-      field // Empty string (represents NULL)
+      return "\"\"" // Quoted empty string represents actual empty string (not NULL)
+    }
+    
+    // CRITICAL: Whitespace-only strings must be quoted to preserve whitespace
+    // Unquoted whitespace-only strings may be trimmed by PostgreSQL COPY
+    val isWhitespaceOnly = field.trim.isEmpty && field.nonEmpty
+    
+    val needsQuoting = isWhitespaceOnly || // Whitespace-only strings
+                        field.contains(",") || // Contains delimiter
+                        field.contains("\"") || // Contains quote
+                        field.contains("\n") || // Contains newline
+                        field.contains("\r") || // Contains carriage return
+                        field.startsWith(" ") || // Leading space
+                        field.endsWith(" ") || // Trailing space
+                        field.startsWith("\t") || // Leading tab
+                        field.endsWith("\t") || // Trailing tab
+                        !field.matches("^[\\x20-\\x7E]*$") // Contains non-ASCII characters
+    
+    if (needsQuoting) {
+      // Remove null bytes (0x00) which are invalid in UTF-8
+      val cleaned = removeNullBytes(field)
+      // Escape quotes by doubling them
+      val escaped = cleaned.replace("\"", "\"\"")
+      s""""$escaped""""
     } else {
-      val needsQuoting = field.contains(",") || 
-                        field.contains("\"") || 
-                        field.contains("\n") || 
-                        field.contains("\r") ||
-                        field.startsWith(" ") ||
-                        field.endsWith(" ") ||
-                        field.startsWith("\t") ||
-                        field.endsWith("\t")
-      
-      if (needsQuoting) {
-        // Escape quotes by doubling them
-        val escaped = field.replace("\"", "\"\"")
-        s""""$escaped""""
-      } else {
-        field
-      }
+      // Remove null bytes even from unquoted fields
+      removeNullBytes(field)
     }
   }
   
