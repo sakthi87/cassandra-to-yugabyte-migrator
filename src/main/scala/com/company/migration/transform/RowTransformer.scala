@@ -25,9 +25,16 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
         // CRITICAL: Check if value is null using Spark's isNullAt (not Java null check)
         // This correctly handles null values vs empty strings vs whitespace-only strings
         val isNull = row.isNullAt(fieldIndex)
-        val value = if (isNull) null else row.get(fieldIndex)
         
-        val stringValue = DataTypeConverter.convertToString(value, dataType)
+        // If null, skip convertToString and pass empty string directly
+        // If not null, convert to string first
+        val stringValue = if (isNull) {
+          "" // Empty string for NULL (will be handled by escapeCsvField)
+        } else {
+          val value = row.get(fieldIndex)
+          DataTypeConverter.convertToString(value, dataType)
+        }
+        
         escapeCsvField(stringValue, isNull)
       }
       
