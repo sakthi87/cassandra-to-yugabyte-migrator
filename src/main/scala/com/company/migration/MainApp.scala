@@ -1,6 +1,7 @@
 package com.company.migration
 
 import com.company.migration.config._
+import com.company.migration.cassandra.SplitSizeDecider
 import com.company.migration.execution.{CheckpointManager, TableMigrationJob}
 import com.company.migration.util.{Logging, Metrics, ResourceUtils}
 import com.company.migration.validation.{ChecksumValidator, RowCountValidator}
@@ -65,27 +66,71 @@ object MainApp extends Logging {
           )
         }
         
-        // Load table configuration
-        val tableConfig = TableConfig.fromProperties(props)
-        logInfo(s"Migrating table: ${tableConfig.sourceKeyspace}.${tableConfig.sourceTable}")
-        
-        logInfo(s"========================================")
-        logInfo(s"Migrating table: ${tableConfig.sourceKeyspace}.${tableConfig.sourceTable}")
-        logInfo(s"========================================")
-        
-        // Create and execute migration job
-        val migrationJob = new TableMigrationJob(
-          spark,
-          cassandraConfig,
-          yugabyteConfig,
-          sparkJobConfig,
-          tableConfig,
-          connectionFactory,
-          metrics,
-          checkpointManager,
-          Some(jobId),
-          checkpointInterval
-        )
+      // Load table configuration
+      val tableConfig = TableConfig.fromProperties(props)
+      logInfo(s"Migrating table: ${tableConfig.sourceKeyspace}.${tableConfig.sourceTable}")
+      
+      logInfo(s"========================================")
+      logInfo(s"Migrating table: ${tableConfig.sourceKeyspace}.${tableConfig.sourceTable}")
+      logInfo(s"========================================")
+      
+      // Determine optimal split size at runtime (BEFORE DataFrame read)
+      val autoDetermine = props.getProperty("cassandra.inputSplitSizeMb.autoDetermine", "true").toBoolean
+      val overrideSize = Option(props.getProperty("cassandra.inputSplitSizeMb.override"))
+        .filter(_.nonEmpty)
+        .map(_.toInt)
+      
+      val executorMemoryGb = {
+        val memoryStr = sparkJobConfig.executorMemory.replaceAll("[^0-9]", "")
+        if (memoryStr.nonEmpty) memoryStr.toInt / 1024 else 8 // Default to 8GB if can't parse
+      }
+      
+      val optimalSplitSize = SplitSizeDecider.determineSplitSize(
+        cassandraConfig,
+        tableConfig,
+        executorMemoryGb,
+        autoDetermine,
+        overrideSize
+      )
+      
+      // Update SparkConf with optimal split size (must be done before DataFrame read)
+      spark.conf.set("spark.cassandra.input.split.sizeInMB", optimalSplitSize.toString)
+      spark.conf.set("cassandra.inputSplitSizeMb", optimalSplitSize.toString)
+      
+      // Update cassandraConfig for logging
+      val updatedCassandraConfig = cassandraConfig.copy(inputSplitSizeMb = optimalSplitSize)
+      
+      logWarn(s"✅ Using optimal split size: ${optimalSplitSize}MB for migration")
+      
+      // Truncate target table before migration (if requested or if table has data)
+      try {
+        val truncateConn = connectionFactory.getConnection()
+        try {
+          val truncateStmt = truncateConn.createStatement()
+          truncateStmt.execute(s"TRUNCATE TABLE ${tableConfig.targetSchema}.${tableConfig.targetTable}")
+          truncateConn.commit()
+          logInfo(s"Truncated target table: ${tableConfig.targetSchema}.${tableConfig.targetTable}")
+        } finally {
+          truncateConn.close()
+        }
+      } catch {
+        case e: Exception =>
+          logWarn(s"Could not truncate target table (may not exist or may be empty): ${e.getMessage}")
+      }
+      
+      // Create and execute migration job
+      val migrationJob = new TableMigrationJob(
+        spark,
+        updatedCassandraConfig,
+        yugabyteConfig,
+        sparkJobConfig,
+        tableConfig,
+        connectionFactory,
+        metrics,
+        checkpointManager,
+        Some(jobId),
+        checkpointInterval
+      )
         
         migrationJob.execute()
         
