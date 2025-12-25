@@ -20,19 +20,13 @@ object CassandraTokenPartitioner extends Logging {
   
   /**
    * Log partition information for debugging
+   * NOTE: Does not trigger data reading - only logs partition count
    */
   def logPartitionInfo(df: DataFrame): Unit = {
     val partitionCount = getPartitionCount(df)
     logInfo(s"DataFrame has $partitionCount partitions (token ranges)")
-    
-    // Get approximate row counts per partition
-    val partitionSizes = df.rdd.mapPartitions(iter => Iterator(iter.size)).collect()
-    if (partitionSizes.nonEmpty) {
-      val min = partitionSizes.min
-      val max = partitionSizes.max
-      val avg = partitionSizes.sum / partitionSizes.length
-      logInfo(s"Partition sizes - Min: $min, Max: $max, Avg: $avg")
-    }
+    // NOTE: Removed partition size calculation to avoid triggering data reading during planning
+    // Partition sizes will be tracked via Metrics during actual migration
   }
   
   /**

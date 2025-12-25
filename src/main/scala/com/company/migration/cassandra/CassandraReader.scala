@@ -34,7 +34,9 @@ class CassandraReader(spark: SparkSession, cassandraConfig: CassandraConfig) ext
       .load()
     
     logInfo(s"Successfully read table: ${tableConfig.sourceKeyspace}.${tableConfig.sourceTable}")
-    logInfo(s"Partitions: ${df.rdd.getNumPartitions}, Estimated rows: ${df.count()}")
+    logInfo(s"Partitions: ${df.rdd.getNumPartitions}")
+    // NOTE: Removed df.count() to avoid triggering full table scan during planning phase
+    // Row count will be tracked via Metrics during actual migration
     
     df
   }
