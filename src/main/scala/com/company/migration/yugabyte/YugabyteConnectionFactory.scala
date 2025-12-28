@@ -30,7 +30,7 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
     val classLoader = Thread.currentThread().getContextClassLoader
     try {
       // Load YugabyteDB driver only (required)
-      // CDM Pattern: Load driver using context classloader (critical for Spark)
+      // Pattern: Load driver using context classloader (critical for Spark)
       val contextClassLoader = if (classLoader != null) classLoader else this.getClass.getClassLoader
       val driverInstance = Class
         .forName("com.yugabyte.Driver", true, contextClassLoader)
@@ -38,7 +38,7 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
         .newInstance()
         .asInstanceOf[java.sql.Driver]
       
-      // CDM Pattern: Register driver with DriverManager (CRITICAL!)
+      // Pattern: Register driver with DriverManager (CRITICAL!)
       // This ensures proper driver initialization and URL acceptance
       DriverManager.registerDriver(driverInstance)
       
@@ -83,7 +83,7 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
     props.setProperty("loginTimeout", "10")
     
     // Ensure JDBC URL uses jdbc:yugabytedb:// format (required for YugabyteDB driver)
-    // CDM Pattern: Always use jdbc:yugabytedb:// format
+    // Pattern: Always use jdbc:yugabytedb:// format
     val jdbcUrl = if (yugabyteConfig.jdbcUrl.startsWith("jdbc:postgresql://")) {
       // Convert PostgreSQL URL format to YugabyteDB format
       yugabyteConfig.jdbcUrl.replace("jdbc:postgresql://", "jdbc:yugabytedb://")
@@ -91,7 +91,7 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
       yugabyteConfig.jdbcUrl
     }
     
-    // CDM Pattern: Verify driver accepts URL before connecting
+    // Pattern: Verify driver accepts URL before connecting
     if (!driver.acceptsURL(jdbcUrl)) {
       throw new SQLException(s"YugabyteDB driver does not accept URL: $jdbcUrl. Ensure URL uses jdbc:yugabytedb:// format.")
     }

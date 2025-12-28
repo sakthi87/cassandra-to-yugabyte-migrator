@@ -6,7 +6,7 @@ import com.company.migration.util.{Logging, Metrics}
 /**
  * Validates row counts using migration metrics (no COUNT queries)
  * 
- * CDM Pattern: Uses counters from migration instead of COUNT(*) queries
+ * Uses counters from migration instead of COUNT(*) queries
  * This avoids timeouts on distributed databases (Cassandra/YugabyteDB)
  * 
  * The migration already tracks:

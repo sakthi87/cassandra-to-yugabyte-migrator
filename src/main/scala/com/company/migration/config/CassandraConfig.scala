@@ -18,7 +18,7 @@ case class CassandraConfig(
   inputSplitSizeMb: Int,
   concurrentReads: Int,
   readsPerSec: Int,
-  // Advanced connection settings (CDM-style)
+  // Advanced connection settings
   localConnectionsPerExecutor: Int,
   remoteConnectionsPerExecutor: Int,
   connectionTimeoutMs: Int,

@@ -11,7 +11,7 @@ import org.apache.spark.TaskContext
 /**
  * Executes COPY operation for a single Spark partition
  * This is where the actual data migration happens
- * Includes checkpointing support based on CDM's TrackRun concept
+ * Enhanced with robust checkpointing (run_info + run_details)
  */
 class PartitionExecutor(
   tableConfig: TableConfig,
@@ -21,7 +21,9 @@ class PartitionExecutor(
   sourceSchema: StructType,
   metrics: Metrics,
   checkpointManager: Option[CheckpointManager] = None,
-  jobId: Option[String] = None,
+  runId: Long,
+  tableName: String,
+  partitionId: Int,
   checkpointInterval: Int = 10000
 ) extends Logging with Serializable {
   
@@ -40,17 +42,29 @@ class PartitionExecutor(
     var rowsSkipped = 0L
     var lastProcessedPk: Option[String] = None
     
-    // Get partition ID for checkpointing
-    val partitionId = TaskContext.getPartitionId()
-    val tokenStart = 0L // Spark handles token ranges internally
-    val tokenEnd = 0L
+    // Get partition ID from Spark context (use provided partitionId as fallback)
+    val actualPartitionId = try {
+      TaskContext.getPartitionId()
+    } catch {
+      case _: Exception => partitionId
+    }
     
-    // Initialize checkpoint if enabled
+    // Token range tracking (simplified - Spark handles token ranges internally)
+    // In production, you'd extract actual token ranges from Spark partition metadata
+    // For now, we use partition_id as the identifier
+    val tokenMin = actualPartitionId.toLong // Use partition ID as token identifier
+    val tokenMax = actualPartitionId.toLong
+    
+    // Update checkpoint status to STARTED
     checkpointManager.foreach { cm =>
-      jobId.foreach { jid =>
-        cm.initCheckpoint(jid, partitionId, tokenStart, tokenEnd)
-        cm.updateCheckpoint(jid, partitionId, "RUNNING", 0)
-      }
+      cm.updateRun(
+        tableName = tableName,
+        runId = runId,
+        tokenMin = tokenMin,
+        partitionId = actualPartitionId,
+        status = CheckpointManager.RunStatus.STARTED,
+        runInfo = None
+      )
     }
     
     try {
@@ -86,21 +100,27 @@ class PartitionExecutor(
             rowsWritten += 1
             metrics.incrementRowsRead()
             
+            // Extract primary key for checkpointing (simplified - uses first column)
+            if (targetColumns.nonEmpty && lastProcessedPk.isEmpty) {
+              try {
+                lastProcessedPk = Some(row.getAs[String](targetColumns.head))
+              } catch {
+                case _: Exception => // Ignore if can't extract PK
+              }
+            }
+            
             // Update checkpoint periodically
             if (checkpointManager.isDefined && rowsWritten % checkpointInterval == 0) {
               checkpointManager.foreach { cm =>
-                jobId.foreach { jid =>
-                  // Extract primary key (simplified - would need actual PK extraction)
-                  val pkValue = if (targetColumns.nonEmpty) {
-                    try {
-                      Some(row.getAs[String](targetColumns.head))
-                    } catch {
-                      case _: Exception => None
-                    }
-                  } else None
-                  
-                  cm.updateCheckpoint(jid, partitionId, "RUNNING", rowsWritten, pkValue)
-                }
+                val runInfo = s"rows_written=$rowsWritten,rows_skipped=$rowsSkipped"
+                cm.updateRun(
+                  tableName = tableName,
+                  runId = runId,
+                  tokenMin = tokenMin,
+                  partitionId = actualPartitionId,
+                  status = CheckpointManager.RunStatus.STARTED, // Still running
+                  runInfo = Some(runInfo)
+                )
               }
             }
           case None =>
@@ -113,13 +133,19 @@ class PartitionExecutor(
       val rowsCopied = writer.endCopy()
       connection.commit()
       
-      logInfo(s"Partition completed: $rowsWritten rows written, $rowsSkipped rows skipped, $rowsCopied rows copied by COPY")
+      logInfo(s"Partition $actualPartitionId completed: $rowsWritten rows written, $rowsSkipped rows skipped, $rowsCopied rows copied by COPY")
       
-      // Mark checkpoint as DONE
+      // Mark checkpoint as PASS
       checkpointManager.foreach { cm =>
-        jobId.foreach { jid =>
-          cm.updateCheckpoint(jid, partitionId, "DONE", rowsWritten, lastProcessedPk)
-        }
+        val runInfo = s"rows_written=$rowsWritten,rows_skipped=$rowsSkipped,rows_copied=$rowsCopied"
+        cm.updateRun(
+          tableName = tableName,
+          runId = runId,
+          tokenMin = tokenMin,
+          partitionId = actualPartitionId,
+          status = CheckpointManager.RunStatus.PASS,
+          runInfo = Some(runInfo)
+        )
       }
       
       metrics.incrementRowsWritten(rowsWritten)
@@ -129,7 +155,7 @@ class PartitionExecutor(
       
     } catch {
       case e: Exception =>
-        logError(s"Error executing partition: ${e.getMessage}", e)
+        logError(s"Error executing partition $actualPartitionId: ${e.getMessage}", e)
         
         // Rollback and cleanup
         conn.foreach { c =>
@@ -143,11 +169,17 @@ class PartitionExecutor(
         
         copyWriter.foreach(_.cancelCopy())
         
-        // Mark checkpoint as FAILED
+        // Mark checkpoint as FAIL
         checkpointManager.foreach { cm =>
-          jobId.foreach { jid =>
-            cm.updateCheckpoint(jid, partitionId, "FAILED", rowsWritten, lastProcessedPk)
-          }
+          val runInfo = s"error=${e.getMessage},rows_written=$rowsWritten,rows_skipped=$rowsSkipped"
+          cm.updateRun(
+            tableName = tableName,
+            runId = runId,
+            tokenMin = tokenMin,
+            partitionId = actualPartitionId,
+            status = CheckpointManager.RunStatus.FAIL,
+            runInfo = Some(runInfo)
+          )
         }
         
         metrics.incrementPartitionsFailed()
@@ -164,4 +196,3 @@ class PartitionExecutor(
     }
   }
 }
-

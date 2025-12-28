@@ -26,9 +26,24 @@ object MainApp extends Logging {
       
       // Migration settings
       val checkpointEnabled = props.getProperty("migration.checkpoint.enabled", "true").toBoolean
-      val checkpointTable = props.getProperty("migration.checkpoint.table", "migration_checkpoint")
+      val checkpointKeyspace = props.getProperty("migration.checkpoint.keyspace", "public")
       val checkpointInterval = props.getProperty("migration.checkpoint.interval", "10000").toInt
-      val jobId = props.getProperty("migration.jobId", s"migration-job-${System.currentTimeMillis() / 1000}")
+      
+      // Run ID management
+      val runIdStr = props.getProperty("migration.runId", "")
+      val runId = if (runIdStr.nonEmpty) {
+        runIdStr.toLong
+      } else {
+        System.currentTimeMillis() / 1000 // Auto-generate if not provided
+      }
+      
+      val prevRunIdStr = props.getProperty("migration.prevRunId", "0")
+      val prevRunId = if (prevRunIdStr.nonEmpty && prevRunIdStr != "0") {
+        prevRunIdStr.toLong
+      } else {
+        0L
+      }
+      
       val validationEnabled = props.getProperty("migration.validation.enabled", "true").toBoolean
       val validationSampleSize = props.getProperty("migration.validation.sampleSize", "1000").toInt
       
@@ -46,10 +61,10 @@ object MainApp extends Logging {
       val connectionFactory = new YugabyteConnectionFactory(yugabyteConfig)
       
       // Initialize checkpoint manager if enabled
-      // CDM Pattern: CheckpointManager creates its own connections per operation
+      // Pattern: CheckpointManager creates its own connections per operation
       val checkpointManager = if (checkpointEnabled) {
-        val cm = new CheckpointManager(yugabyteConfig, checkpointTable)
-        cm.initializeCheckpointTable()
+        val cm = new CheckpointManager(yugabyteConfig, checkpointKeyspace)
+        cm.initializeCheckpointTables()
         Some(cm)
       } else {
         None
@@ -118,6 +133,21 @@ object MainApp extends Logging {
           logWarn(s"Could not truncate target table (may not exist or may be empty): ${e.getMessage}")
       }
       
+      // Log run information
+      if (checkpointEnabled) {
+        logInfo(s"========================================")
+        logInfo(s"Migration Run Information")
+        logInfo(s"========================================")
+        logInfo(s"Run ID: $runId")
+        if (prevRunId > 0) {
+          logInfo(s"Previous Run ID: $prevRunId (resume mode)")
+        } else {
+          logInfo(s"Previous Run ID: None (new run)")
+        }
+        logInfo(s"Table: ${tableConfig.sourceKeyspace}.${tableConfig.sourceTable}")
+        logInfo(s"========================================")
+      }
+      
       // Create and execute migration job
       val migrationJob = new TableMigrationJob(
         spark,
@@ -128,14 +158,25 @@ object MainApp extends Logging {
         connectionFactory,
         metrics,
         checkpointManager,
-        Some(jobId),
+        runId,
+        prevRunId,
         checkpointInterval
       )
         
         migrationJob.execute()
         
+        // End checkpoint run if enabled
+        checkpointManager.foreach { cm =>
+          val runInfo = metrics.getSummary
+          cm.endRun(
+            tableName = s"${tableConfig.sourceKeyspace}.${tableConfig.sourceTable}",
+            runId = runId,
+            runInfo = runInfo
+          )
+        }
+        
         // Validate if enabled
-        // CDM Pattern: Use migration metrics instead of COUNT queries (avoids timeout)
+        // Pattern: Use migration metrics instead of COUNT queries (avoids timeout)
         if (validationEnabled && tableConfig.validate) {
           logWarn("Running validation using migration metrics (no COUNT queries)...")
           
@@ -199,7 +240,7 @@ object MainApp extends Logging {
       .set("spark.stage.maxConsecutiveAttempts", sparkJobConfig.stageMaxConsecutiveAttempts.toString)
       .set("spark.network.timeout", sparkJobConfig.networkTimeout)
       .set("spark.serializer", sparkJobConfig.serializer)
-      // Cassandra connector settings (CDM-style)
+              // Cassandra connector settings
       .set("spark.cassandra.connection.host", cassandraConfig.hosts)
       .set("spark.cassandra.connection.port", cassandraConfig.port.toString)
       .set("spark.cassandra.connection.local_dc", cassandraConfig.localDC) // Note: local_dc (underscore) not localDC
@@ -208,7 +249,7 @@ object MainApp extends Logging {
       .set("spark.cassandra.input.split.sizeInMB", cassandraConfig.inputSplitSizeMb.toString)
       .set("spark.cassandra.input.consistency.level", cassandraConfig.consistencyLevel)
       .set("spark.cassandra.concurrent.reads", cassandraConfig.concurrentReads.toString)
-      // Advanced connection settings (CDM-style) - only set if connector supports them
+              // Advanced connection settings - only set if connector supports them
       // Note: Some properties may not be supported by all connector versions
       // These are optional and will be ignored if not supported
       try {
