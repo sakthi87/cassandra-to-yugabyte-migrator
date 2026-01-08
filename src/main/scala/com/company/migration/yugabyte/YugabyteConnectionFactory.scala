@@ -32,9 +32,8 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
   // Store driver instance to use directly (avoids DriverManager classloader issues)
   private val driver: java.sql.Driver = initDriver()
   
-  // Round-robin counter for load balancing across multiple hosts
-  // Thread-safe atomic counter ensures even distribution across Spark partitions
-  private val connectionCounter = new AtomicInteger(0)
+  // Note: Round-robin is now based on partition ID (passed to getConnection)
+  // This ensures proper distribution across Spark partitions without shared state
   
   private def initDriver(): java.sql.Driver = {
     val classLoader = Thread.currentThread().getContextClassLoader
@@ -75,11 +74,13 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
    * and closed after the partition is processed.
    * 
    * Load Balancing:
-   * - Uses round-robin selection to distribute connections across hosts
-   * - Each call to getConnection() selects the next host in the list
+   * - Uses partition ID to deterministically select host
+   * - Partition 0 → host[0], Partition 1 → host[1], Partition 2 → host[2], Partition 3 → host[0] (wraps)
    * - Ensures even distribution of COPY connections across YugabyteDB nodes
+   * 
+   * @param partitionId Spark partition ID (0, 1, 2, ...)
    */
-  def getConnection(): Connection = {
+  def getConnection(partitionId: Int = 0): Connection = {
     val props = new java.util.Properties()
     props.setProperty("user", yugabyteConfig.username)
     props.setProperty("password", yugabyteConfig.password)
@@ -97,19 +98,21 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
     props.setProperty("connectTimeout", "10")
     props.setProperty("loginTimeout", "10")
     
-    // Round-robin host selection for load balancing
+    // Round-robin host selection based on partition ID for load balancing
     val hosts = yugabyteConfig.hosts
     if (hosts.isEmpty) {
       throw new SQLException("No YugabyteDB hosts configured. Check yugabyte.host property.")
     }
     
-    val hostIndex = connectionCounter.getAndIncrement() % hosts.length
+    // Use partition ID to deterministically select host (works perfectly in Spark)
+    // Partition 0 → host[0], Partition 1 → host[1], Partition 2 → host[2], etc.
+    val hostIndex = partitionId % hosts.length
     val selectedHost = hosts(hostIndex)
     
     // Build JDBC URL for the selected host
     val jdbcUrl = yugabyteConfig.getJdbcUrlForHost(selectedHost)
     
-    logInfo(s"Connecting to YugabyteDB host $selectedHost (${hostIndex + 1}/${hosts.length}) for partition")
+    logInfo(s"Connecting to YugabyteDB host $selectedHost (${hostIndex + 1}/${hosts.length}) for partition $partitionId")
     
     // Pattern: Verify driver accepts URL before connecting
     if (!driver.acceptsURL(jdbcUrl)) {
@@ -133,7 +136,7 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
    * Same as getConnection() but explicitly documented
    */
   def getDirectConnection(): Connection = {
-    getConnection()
+    getConnection(0)  // Default partition ID 0 for non-Spark usage
   }
   
   /**

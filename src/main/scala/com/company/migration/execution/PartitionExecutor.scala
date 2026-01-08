@@ -70,8 +70,8 @@ class PartitionExecutor(
     try {
       // Recreate connection factory per partition (not serializable)
       val localConnectionFactory = new YugabyteConnectionFactory(yugabyteConfig)
-      // Get connection
-      conn = Some(localConnectionFactory.getConnection())
+      // Get connection using partition ID for round-robin load balancing
+      conn = Some(localConnectionFactory.getConnection(actualPartitionId))
       val connection = conn.get
       
       // Build COPY statement
