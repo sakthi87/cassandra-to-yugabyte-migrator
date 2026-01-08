@@ -6,7 +6,9 @@ import java.util.Properties
  * YugabyteDB connection and COPY configuration
  */
 case class YugabyteConfig(
-  jdbcUrl: String,
+  hosts: List[String],  // List of hosts for round-robin load balancing
+  port: Int,
+  database: String,
   username: String,
   password: String,
   maxPoolSize: Int,
@@ -22,8 +24,24 @@ case class YugabyteConfig(
   csvQuote: String,
   csvEscape: String,
   isolationLevel: String,
-  autoCommit: Boolean
-)
+  autoCommit: Boolean,
+  jdbcParams: String  // JDBC URL parameters (without host/port/database)
+) {
+  /**
+   * Get base JDBC URL for a single host (used for round-robin connection)
+   */
+  def getJdbcUrlForHost(host: String): String = {
+    val baseUrl = s"jdbc:yugabytedb://$host:$port/$database"
+    if (jdbcParams.nonEmpty) s"$baseUrl?$jdbcParams" else baseUrl
+  }
+  
+  /**
+   * Legacy jdbcUrl field for backward compatibility (uses first host)
+   * @deprecated Use getJdbcUrlForHost() for round-robin connections
+   */
+  @deprecated("Use getJdbcUrlForHost() for proper load balancing", "1.0")
+  def jdbcUrl: String = getJdbcUrlForHost(hosts.head)
+}
 
 object YugabyteConfig {
   def fromProperties(props: Properties): YugabyteConfig = {
@@ -45,22 +63,16 @@ object YugabyteConfig {
     val port = getIntProperty("yugabyte.port", 5433)
     val database = getProperty("yugabyte.database", "yugabyte")
     
-    // Build JDBC URL - Always use YugabyteDB format (jdbc:yugabytedb://)
-    // YugabyteDB driver requires jdbc:yugabytedb:// URL format
-    val hosts = host.split(",").map(_.trim)
-    val baseUrl = if (hosts.length > 1) {
-      // Multiple hosts - use YugabyteDB format for load balancing
-      val hostPorts = hosts.map(h => s"$h:$port").mkString(",")
-      s"jdbc:yugabytedb://$hostPorts/$database"
-    } else {
-      // Single host - use YugabyteDB format (required for YugabyteDB driver)
-      s"jdbc:yugabytedb://$host:$port/$database"
-    }
-    val urlParams = buildJdbcParams(props)
-    val jdbcUrl = if (urlParams.nonEmpty) s"$baseUrl?$urlParams" else baseUrl
+    // Parse hosts (support comma-separated list for multi-node clusters)
+    val hosts = host.split(",").map(_.trim).filter(_.nonEmpty).toList
+    
+    // Build JDBC URL parameters (without host/port/database)
+    val jdbcParams = buildJdbcParams(props)
     
     YugabyteConfig(
-      jdbcUrl = jdbcUrl,
+      hosts = hosts,
+      port = port,
+      database = database,
       username = getProperty("yugabyte.username", "yugabyte"),
       password = getProperty("yugabyte.password", "yugabyte"),
       maxPoolSize = getIntProperty("yugabyte.maxPoolSize", 8),
@@ -76,23 +88,20 @@ object YugabyteConfig {
       csvQuote = getProperty("yugabyte.csvQuote", "\""),
       csvEscape = getProperty("yugabyte.csvEscape", "\""),
       isolationLevel = getProperty("yugabyte.isolationLevel", "READ_COMMITTED"),
-      autoCommit = getBooleanProperty("yugabyte.autoCommit", false)
+      autoCommit = getBooleanProperty("yugabyte.autoCommit", false),
+      jdbcParams = jdbcParams
     )
   }
   
   private def buildJdbcParams(props: Properties): String = {
     val params = scala.collection.mutable.ListBuffer[String]()
     
-    // Load balancing (works for single region without topology keys)
-    // Topology keys are only needed for multi-region/stretch clusters
-    val loadBalance = props.getProperty("yugabyte.loadBalanceHosts", "true").toBoolean
-    if (loadBalance) {
-      params += "loadBalance=true"
-      // Only add topologyKeys if explicitly configured (for multi-region)
-      val topologyKeys = props.getProperty("yugabyte.topologyKeys", "")
-      if (topologyKeys.nonEmpty) {
-        params += s"topologyKeys=$topologyKeys"
-      }
+    // Note: We don't use loadBalance=true in JDBC params when doing round-robin
+    // Round-robin selection happens at connection factory level
+    // Only add topologyKeys if explicitly configured (for multi-region scenarios)
+    val topologyKeys = props.getProperty("yugabyte.topologyKeys", "")
+    if (topologyKeys.nonEmpty) {
+      params += s"topologyKeys=$topologyKeys"
     }
     
     // COPY-optimized properties (mandatory for performance)
@@ -109,8 +118,6 @@ object YugabyteConfig {
     // Connection keep-alive
     params += "tcpKeepAlive=true"
     params += "keepAlive=true"
-    
-    // Note: topologyKeys already handled above in loadBalance section
     
     params.mkString("&")
   }

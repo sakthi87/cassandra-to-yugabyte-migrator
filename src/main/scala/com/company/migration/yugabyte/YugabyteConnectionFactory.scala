@@ -3,11 +3,17 @@ package com.company.migration.yugabyte
 import com.company.migration.config.YugabyteConfig
 import com.company.migration.util.Logging
 import java.sql.{Connection, DriverManager, SQLException}
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Factory for creating YugabyteDB connections
+ * Factory for creating YugabyteDB connections with round-robin load balancing
  * 
  * CRITICAL: Uses DriverManager.getConnection() per Spark partition (NOT HikariCP)
+ * 
+ * Load Balancing:
+ * - Implements round-robin host selection to distribute connections across nodes
+ * - Each partition gets a connection to a different host (distributed evenly)
+ * - This balances CPU load across all YugabyteDB nodes
  * 
  * Why no pooling?
  * - COPY FROM STDIN is long-lived (minutes per connection)
@@ -25,6 +31,10 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
   
   // Store driver instance to use directly (avoids DriverManager classloader issues)
   private val driver: java.sql.Driver = initDriver()
+  
+  // Round-robin counter for load balancing across multiple hosts
+  // Thread-safe atomic counter ensures even distribution across Spark partitions
+  private val connectionCounter = new AtomicInteger(0)
   
   private def initDriver(): java.sql.Driver = {
     val classLoader = Thread.currentThread().getContextClassLoader
@@ -58,11 +68,16 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
   }
   
   /**
-   * Get a connection for a Spark partition
+   * Get a connection for a Spark partition with round-robin load balancing
    * 
    * CRITICAL: One connection per Spark partition (not pooled)
    * This connection should be used for the entire COPY operation
    * and closed after the partition is processed.
+   * 
+   * Load Balancing:
+   * - Uses round-robin selection to distribute connections across hosts
+   * - Each call to getConnection() selects the next host in the list
+   * - Ensures even distribution of COPY connections across YugabyteDB nodes
    */
   def getConnection(): Connection = {
     val props = new java.util.Properties()
@@ -82,14 +97,19 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
     props.setProperty("connectTimeout", "10")
     props.setProperty("loginTimeout", "10")
     
-    // Ensure JDBC URL uses jdbc:yugabytedb:// format (required for YugabyteDB driver)
-    // Pattern: Always use jdbc:yugabytedb:// format
-    val jdbcUrl = if (yugabyteConfig.jdbcUrl.startsWith("jdbc:postgresql://")) {
-      // Convert PostgreSQL URL format to YugabyteDB format
-      yugabyteConfig.jdbcUrl.replace("jdbc:postgresql://", "jdbc:yugabytedb://")
-    } else {
-      yugabyteConfig.jdbcUrl
+    // Round-robin host selection for load balancing
+    val hosts = yugabyteConfig.hosts
+    if (hosts.isEmpty) {
+      throw new SQLException("No YugabyteDB hosts configured. Check yugabyte.host property.")
     }
+    
+    val hostIndex = connectionCounter.getAndIncrement() % hosts.length
+    val selectedHost = hosts(hostIndex)
+    
+    // Build JDBC URL for the selected host
+    val jdbcUrl = yugabyteConfig.getJdbcUrlForHost(selectedHost)
+    
+    logInfo(s"Connecting to YugabyteDB host $selectedHost (${hostIndex + 1}/${hosts.length}) for partition")
     
     // Pattern: Verify driver accepts URL before connecting
     if (!driver.acceptsURL(jdbcUrl)) {
@@ -104,7 +124,7 @@ class YugabyteConnectionFactory(yugabyteConfig: YugabyteConfig) extends Logging 
     conn.setTransactionIsolation(getIsolationLevel(yugabyteConfig.isolationLevel))
     conn.setAutoCommit(yugabyteConfig.autoCommit)
     
-    logDebug(s"Created new connection for partition: ${conn.getClass.getSimpleName}")
+    logDebug(s"Created new connection to $selectedHost for partition: ${conn.getClass.getSimpleName}")
     conn
   }
   
