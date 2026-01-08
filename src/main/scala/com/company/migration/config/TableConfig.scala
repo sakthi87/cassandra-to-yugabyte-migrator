@@ -14,7 +14,8 @@ case class TableConfig(
   columnMapping: Map[String, String],
   typeMapping: Map[String, String],
   primaryKey: List[String],
-  validate: Boolean
+  validate: Boolean,
+  constantColumns: Map[String, String] = Map.empty  // Column name -> constant value (for audit fields)
 )
 
 object TableConfig {
@@ -56,6 +57,32 @@ object TableConfig {
       List.empty[String]
     }
     
+    // Extract constant columns (default values for target columns not in source)
+    // Format: table.constantColumns.names=col1,col2,col3
+    //         table.constantColumns.values=val1,val2,val3
+    //         table.constantColumns.splitRegex=, (optional, defaults to comma)
+    val constantColumns = {
+      val namesStr = getProperty("table.constantColumns.names", "")
+      val valuesStr = getProperty("table.constantColumns.values", "")
+      val splitRegex = getProperty("table.constantColumns.splitRegex", ",")
+      
+      if (namesStr.nonEmpty && valuesStr.nonEmpty) {
+        val names = namesStr.split(splitRegex).map(_.trim).filter(_.nonEmpty)
+        val values = valuesStr.split(splitRegex).map(_.trim).filter(_.nonEmpty)
+        
+        if (names.length != values.length) {
+          throw new IllegalArgumentException(
+            s"Constant column names (${names.length}) and values (${values.length}) count must match. " +
+            s"Names: ${names.mkString(", ")}, Values: ${values.mkString(", ")}"
+          )
+        }
+        
+        names.zip(values).toMap
+      } else {
+        Map.empty[String, String]
+      }
+    }
+    
     TableConfig(
       sourceKeyspace = getProperty("table.source.keyspace"),
       sourceTable = getProperty("table.source.table"),
@@ -64,7 +91,8 @@ object TableConfig {
       columnMapping = columnMapping,
       typeMapping = typeMapping,
       primaryKey = primaryKey,
-      validate = getBooleanProperty("table.validate", true)
+      validate = getBooleanProperty("table.validate", true),
+      constantColumns = constantColumns
     )
   }
   

@@ -13,9 +13,10 @@ object SchemaMapper {
   /**
    * Get target column names in order
    * Applies column mapping if specified
+   * Includes constant columns at the end (for audit fields, etc.)
    */
   def getTargetColumns(sourceSchema: StructType, tableConfig: TableConfig): List[String] = {
-    if (tableConfig.columnMapping.isEmpty) {
+    val sourceColumns = if (tableConfig.columnMapping.isEmpty) {
       // No mapping - use source column names
       sourceSchema.fieldNames.toList
     } else {
@@ -24,6 +25,10 @@ object SchemaMapper {
         tableConfig.columnMapping.getOrElse(sourceCol, sourceCol)
       }.toList
     }
+    
+    // Append constant columns (columns with default values not in source)
+    val constantColumnNames = tableConfig.constantColumns.keys.toList
+    sourceColumns ++ constantColumnNames
   }
   
   /**

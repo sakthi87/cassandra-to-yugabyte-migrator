@@ -1,0 +1,58 @@
+# Example properties file showing Constant Columns feature usage
+# This file demonstrates how to configure default values for target columns
+
+# =============================================================================
+# TABLE CONFIGURATION
+# =============================================================================
+table.source.keyspace=your_keyspace
+table.source.table=your_table
+table.target.schema=public
+table.target.table=your_table
+
+# =============================================================================
+# CONSTANT COLUMNS (Default Values for Target Columns)
+# =============================================================================
+# Use this feature to populate audit fields or other columns in the target table
+# that don't exist in the source table.
+#
+# Format:
+#   table.constantColumns.names=<column1>,<column2>,<column3>
+#   table.constantColumns.values=<value1>,<value2>,<value3>
+#   table.constantColumns.splitRegex=, (optional, defaults to comma)
+#
+# Notes:
+# - Column names must exist in the TARGET table schema
+# - Values are written as strings in CSV (YugabyteDB will validate types)
+# - String values should be provided without outer quotes (they'll be escaped automatically)
+# - Numeric values (INT, BIGINT, etc.) should be provided as numbers (no quotes)
+# - Boolean values: true or false (no quotes)
+#
+# Example 1: Basic audit fields
+table.constantColumns.names=created_by,migration_date,source_system
+table.constantColumns.values=CDM_MIGRATION,2024-12-16,CASSANDRA_PROD
+
+# Example 2: With numeric and boolean values
+# table.constantColumns.names=migration_run_id,data_version,is_migrated
+# table.constantColumns.values=1702732800000,1,true
+
+# Example 3: With custom delimiter (if values contain commas)
+# table.constantColumns.names=migration_tags,migration_metadata
+# table.constantColumns.values=['source_cassandra','env_prod']|{'migrator':'CDM','version':'4.0'}
+# table.constantColumns.splitRegex=\\|
+
+# =============================================================================
+# CASSANDRA CONNECTION
+# =============================================================================
+cassandra.host=localhost
+cassandra.port=9042
+cassandra.localDC=datacenter1
+
+# =============================================================================
+# YUGABYTEDB CONNECTION
+# =============================================================================
+yugabyte.host=localhost
+yugabyte.port=5433
+yugabyte.database=yugabyte
+yugabyte.username=yugabyte
+yugabyte.password=yugabyte
+

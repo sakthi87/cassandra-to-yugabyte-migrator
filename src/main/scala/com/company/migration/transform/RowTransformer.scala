@@ -14,10 +14,18 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
   /**
    * Convert a Row to CSV string
    * Returns null if row should be skipped (e.g., null primary key)
+   * Includes constant columns (default values) at the end
    */
   def toCsv(row: Row): Option[String] = {
     try {
-      val values = targetColumns.map { targetCol =>
+      // Split target columns into source columns and constant columns
+      val (sourceTargetCols, constantCols) = targetColumns.partition { targetCol =>
+        // Check if this is a constant column (has a default value)
+        !tableConfig.constantColumns.contains(targetCol)
+      }
+      
+      // Transform source columns
+      val sourceValues = sourceTargetCols.map { targetCol =>
         val sourceCol = SchemaMapper.getSourceColumnName(targetCol, tableConfig)
         val fieldIndex = sourceSchema.fieldIndex(sourceCol)
         val dataType = sourceSchema.fields(fieldIndex).dataType
@@ -38,7 +46,20 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
         escapeCsvField(stringValue, isNull)
       }
       
-      Some(values.mkString(","))
+      // Add constant column values (already strings, just need to escape)
+      val constantValues = constantCols.map { constantCol =>
+        val constantValue = tableConfig.constantColumns(constantCol)
+        // Constant values are provided as strings (e.g., "'CDM_MIGRATION'" or "12345")
+        // Remove outer quotes if present (they'll be added by escapeCsvField if needed)
+        val unquotedValue = if (constantValue.startsWith("'") && constantValue.endsWith("'") && constantValue.length > 1) {
+          constantValue.substring(1, constantValue.length - 1)
+        } else {
+          constantValue
+        }
+        escapeCsvField(unquotedValue, isNull = false)
+      }
+      
+      Some((sourceValues ++ constantValues).mkString(","))
     } catch {
       case e: Exception =>
         logWarn(s"Error transforming row to CSV: ${e.getMessage}")
