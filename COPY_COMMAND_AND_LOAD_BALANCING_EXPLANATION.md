@@ -96,7 +96,19 @@ Each partition:
 
 ### Issue: First Node Gets 90% CPU, Others Get 30%
 
-**Root Cause:** Even though you provide multiple hosts in the JDBC URL and set `loadBalance=true`, **`DriverManager.getConnection()` does NOT distribute connections across nodes**.
+**Observation:** 
+- ✅ **LSM DB SEEK metrics show equal data distribution** across all 3 nodes (YugabyteDB Anywhere)
+- ❌ **CPU usage is imbalanced:** Node1: 90%, Node2: 30%, Node3: 30%
+
+**Root Cause:** Even though you provide multiple hosts in the JDBC URL and set `loadBalance=true`, **`DriverManager.getConnection()` does NOT distribute connections across nodes**. All COPY connections go to Node1, which then handles:
+1. Receiving all COPY FROM STDIN streams
+2. Writing to its local partitions
+3. Coordinating cross-node writes to Node2 and Node3 partitions (network overhead)
+4. Managing transaction coordination
+
+This explains why:
+- **Data distribution is balanced** (YugabyteDB internally distributes data evenly across nodes)
+- **CPU is imbalanced** (Node1 does all the COPY coordination work, even though data ends up on all nodes)
 
 ### How JDBC URL with Multiple Hosts Works
 
@@ -208,8 +220,9 @@ For production environments, consider:
 | **Connection Method** | `DriverManager.getConnection()` per partition |
 | **JDBC URL** | `jdbc:yugabytedb://node1,node2,node3/db?loadBalance=true` |
 | **Load Balancing** | ❌ **NOT WORKING** - all connections go to first node |
+| **Data Distribution (LSM DB SEEK)** | ✅ **BALANCED** - Data distributed evenly across all nodes |
 | **CPU Distribution** | Node1: 90%, Node2: 30%, Node3: 30% |
-| **Reason** | DriverManager doesn't distribute connections evenly |
+| **Reason** | DriverManager doesn't distribute connections evenly. Node1 handles all COPY streams and coordinates cross-node writes, even though data is distributed to all nodes |
 
 ## Quick Fix: Round-Robin Host Selection
 
@@ -271,8 +284,14 @@ You should see connections distributed across all nodes instead of concentrated 
 1. **10 partitions = 10 COPY commands** (one per partition)
 2. **Each partition creates its own connection**
 3. **Problem:** `DriverManager.getConnection()` doesn't distribute connections evenly
-4. **Solution:** Implement round-robin host selection or use connection pool
-5. **Quick fix:** Manually select host using round-robin in `getConnection()`
+4. **Key Insight:** 
+   - ✅ Data distribution is balanced (LSM DB SEEK shows equal splits across nodes)
+   - ❌ CPU is imbalanced (Node1: 90%, Others: 30%)
+   - **Why:** All COPY connections hit Node1, which coordinates all writes (including cross-node)
+5. **Solution:** Implement round-robin host selection to distribute COPY connections across nodes
+6. **Expected Result After Fix:**
+   - Data distribution: Still balanced (YugabyteDB handles this)
+   - CPU distribution: Should be ~33% per node (each node handles ~1/3 of COPY connections)
 
-The load imbalance (90% CPU on node1) is because all connections are going to the first host, even though the JDBC URL contains multiple hosts. The `loadBalance=true` parameter doesn't help with direct `DriverManager.getConnection()` calls.
+The load imbalance (90% CPU on node1) is because all connections are going to the first host. Node1 receives all COPY streams and coordinates writes to all nodes, creating CPU hotspot. Even though YugabyteDB distributes the data evenly (hence balanced LSM DB SEEK metrics), the COPY coordination overhead is concentrated on Node1. Distributing connections across nodes will distribute this coordination overhead.
 
