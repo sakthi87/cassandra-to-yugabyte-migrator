@@ -28,7 +28,8 @@ case class YugabyteConfig(
   jdbcParams: String,  // JDBC URL parameters (without host/port/database)
   insertMode: String,  // "COPY" or "INSERT" - controls which insert method to use
   insertBatchSize: Int,  // Batch size for INSERT mode (default: 1000)
-  disableTransactionalWrites: Boolean  // Set yb_disable_transactional_writes = on for performance (default: false)
+  disableTransactionalWrites: Boolean,  // Set yb_disable_transactional_writes = on for performance (default: false)
+  copyReplace: Boolean  // Use COPY WITH REPLACE for idempotent upsert behavior (default: false)
 ) {
   /**
    * Get base JDBC URL for a single host (used for round-robin connection)
@@ -95,7 +96,8 @@ object YugabyteConfig {
       jdbcParams = jdbcParams,
       insertMode = getProperty("yugabyte.insertMode", "COPY").toUpperCase,  // COPY or INSERT
       insertBatchSize = getIntProperty("yugabyte.insertBatchSize", 1000),  // Batch size for INSERT mode
-      disableTransactionalWrites = getBooleanProperty("yugabyte.disableTransactionalWrites", false)  // Enable yb_disable_transactional_writes for performance
+      disableTransactionalWrites = getBooleanProperty("yugabyte.disableTransactionalWrites", false),  // Enable yb_disable_transactional_writes for performance
+      copyReplace = getBooleanProperty("yugabyte.copyReplace", false)  // Use COPY WITH REPLACE for idempotent upsert (default: false)
     )
   }
   
