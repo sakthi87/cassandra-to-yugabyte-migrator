@@ -1,0 +1,12 @@
+Mode: COPY
+Start Time: 26/01/08 17:13:41
+End Time: 26/01/08 17:13:54
+Duration: 
+Rows Read: 100000
+Rows Written: 100000
+Rows Skipped: 0
+Duplicates Skipped: 0
+Partitions Completed: 35
+Errors: 3
+Actual Duration (seconds): 18
+Rows in YugabyteDB: 100000

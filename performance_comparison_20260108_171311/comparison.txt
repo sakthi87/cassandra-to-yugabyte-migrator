@@ -1,0 +1,18 @@
+Performance Comparison: INSERT vs COPY Mode
+============================================
+
+Metric                    INSERT Mode      COPY Mode
+--------------------------------------------------------------
+Duration (seconds)        19        18
+Rows Written              100000        100000
+Throughput (rows/sec)     5263.15        5555.55
+Duplicates Skipped                N/A
+
+Comparison:
+- Duration difference: 1 seconds (0% slower for INSERT)
+- Throughput difference: -292.40 rows/sec
+- INSERT throughput is 94.00% of COPY throughput
+
+Recommendation:
+- INSERT mode performs well (94.00% of COPY)
+- Use INSERT mode for idempotent migrations (handles duplicates)
