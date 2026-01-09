@@ -25,7 +25,9 @@ case class YugabyteConfig(
   csvEscape: String,
   isolationLevel: String,
   autoCommit: Boolean,
-  jdbcParams: String  // JDBC URL parameters (without host/port/database)
+  jdbcParams: String,  // JDBC URL parameters (without host/port/database)
+  insertMode: String,  // "COPY" or "INSERT" - controls which insert method to use
+  insertBatchSize: Int  // Batch size for INSERT mode (default: 1000)
 ) {
   /**
    * Get base JDBC URL for a single host (used for round-robin connection)
@@ -89,7 +91,9 @@ object YugabyteConfig {
       csvEscape = getProperty("yugabyte.csvEscape", "\""),
       isolationLevel = getProperty("yugabyte.isolationLevel", "READ_COMMITTED"),
       autoCommit = getBooleanProperty("yugabyte.autoCommit", false),
-      jdbcParams = jdbcParams
+      jdbcParams = jdbcParams,
+      insertMode = getProperty("yugabyte.insertMode", "COPY").toUpperCase,  // COPY or INSERT
+      insertBatchSize = getIntProperty("yugabyte.insertBatchSize", 1000)  // Batch size for INSERT mode
     )
   }
   

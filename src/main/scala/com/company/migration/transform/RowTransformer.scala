@@ -3,7 +3,7 @@ package com.company.migration.transform
 import com.company.migration.config.TableConfig
 import com.company.migration.util.Logging
 import org.apache.spark.sql.Row
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{DataType, StructType}
 
 /**
  * Transforms Spark Rows to CSV format for COPY FROM STDIN
@@ -121,6 +121,99 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
    */
   private def removeNullBytes(str: String): String = {
     str.replace("\u0000", "")
+  }
+  
+  /**
+   * Convert a Row to Array[Any] for INSERT statements with PreparedStatement
+   * Returns None if row should be skipped (e.g., null primary key)
+   * Includes constant columns (default values) at the end
+   */
+  def toValues(row: Row): Option[Array[Any]] = {
+    try {
+      // Split target columns into source columns and constant columns
+      val (sourceTargetCols, constantCols) = targetColumns.partition { targetCol =>
+        !tableConfig.constantColumns.contains(targetCol)
+      }
+      
+      // Transform source columns to values
+      val sourceValues = sourceTargetCols.map { targetCol =>
+        val sourceCol = SchemaMapper.getSourceColumnName(targetCol, tableConfig)
+        val fieldIndex = sourceSchema.fieldIndex(sourceCol)
+        val dataType = sourceSchema.fields(fieldIndex).dataType
+        
+        // Check if value is null
+        if (row.isNullAt(fieldIndex)) {
+          null
+        } else {
+          // Get value and convert to appropriate type for JDBC
+          val value = row.get(fieldIndex)
+          convertToJdbcType(value, dataType)
+        }
+      }
+      
+      // Add constant column values (parse from string configuration)
+      val constantValues = constantCols.map { constantCol =>
+        val constantValueStr = tableConfig.constantColumns(constantCol)
+        // Parse constant value (basic parsing - could be enhanced)
+        parseConstantValue(constantValueStr)
+      }
+      
+      Some((sourceValues ++ constantValues).toArray)
+    } catch {
+      case e: Exception =>
+        logWarn(s"Error transforming row to values: ${e.getMessage}")
+        None
+    }
+  }
+  
+  /**
+   * Convert value to JDBC-compatible type
+   */
+  private def convertToJdbcType(value: Any, dataType: DataType): Any = {
+    // For most types, Spark Row already provides the correct Java types
+    // This is a simplified conversion - can be enhanced for edge cases
+    value match {
+      case timestamp: java.sql.Timestamp => timestamp
+      case date: java.sql.Date => date
+      case instant: java.time.Instant => java.sql.Timestamp.from(instant)
+      case ldt: java.time.LocalDateTime => java.sql.Timestamp.valueOf(ldt)
+      case _ => value  // Use as-is for primitives (String, Int, Long, Double, Boolean, etc.)
+    }
+  }
+  
+  /**
+   * Parse constant value from string configuration
+   * Supports basic types: strings (with quotes), numbers, booleans
+   */
+  private def parseConstantValue(valueStr: String): Any = {
+    val trimmed = valueStr.trim
+    // Remove surrounding quotes if present
+    if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length > 1) {
+      trimmed.substring(1, trimmed.length - 1)
+    } else if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length > 1) {
+      trimmed.substring(1, trimmed.length - 1)
+    } else if (trimmed.toLowerCase == "true") {
+      true
+    } else if (trimmed.toLowerCase == "false") {
+      false
+    } else if (trimmed.matches("^-?\\d+$")) {
+      // Integer
+      try {
+        trimmed.toLong  // Use Long to handle large integers
+      } catch {
+        case _: NumberFormatException => trimmed
+      }
+    } else if (trimmed.matches("^-?\\d+\\.\\d+$")) {
+      // Double
+      try {
+        trimmed.toDouble
+      } catch {
+        case _: NumberFormatException => trimmed
+      }
+    } else {
+      // String (default)
+      trimmed
+    }
   }
 }
 
