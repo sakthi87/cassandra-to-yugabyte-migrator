@@ -82,6 +82,17 @@ class PartitionExecutor(
       conn = Some(localConnectionFactory.getConnection(actualPartitionId))
       val connection = conn.get
       
+      // Set YugabyteDB session parameters for performance optimization
+      if (yugabyteConfig.disableTransactionalWrites) {
+        val stmt = connection.createStatement()
+        try {
+          stmt.execute("SET yb_disable_transactional_writes = on;")
+          logInfo(s"Partition $actualPartitionId: Enabled yb_disable_transactional_writes for performance")
+        } finally {
+          stmt.close()
+        }
+      }
+      
       if (insertMode == "INSERT") {
         // INSERT mode: Use batched INSERT ... ON CONFLICT DO NOTHING
         // Discover primary key columns
