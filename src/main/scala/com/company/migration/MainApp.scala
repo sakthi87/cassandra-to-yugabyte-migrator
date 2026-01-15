@@ -47,6 +47,9 @@ object MainApp extends Logging {
       val validationEnabled = props.getProperty("migration.validation.enabled", "true").toBoolean
       val validationSampleSize = props.getProperty("migration.validation.sampleSize", "1000").toInt
       
+      // Target table truncation (default: true to preserve current behavior)
+      val truncateTargetTable = props.getProperty("yugabyte.truncateTargetTable", "true").toBoolean
+      
       // Initialize Spark
       val sparkConf = createSparkConf(sparkJobConfig, cassandraConfig)
       val spark = SparkSession.builder()
@@ -117,20 +120,24 @@ object MainApp extends Logging {
       
       logWarn(s"✅ Using optimal split size: ${optimalSplitSize}MB for migration")
       
-      // Truncate target table before migration (if requested or if table has data)
-      try {
-        val truncateConn = connectionFactory.getConnection()
+      // Truncate target table before migration (optional)
+      if (truncateTargetTable) {
         try {
-          val truncateStmt = truncateConn.createStatement()
-          truncateStmt.execute(s"TRUNCATE TABLE ${tableConfig.targetSchema}.${tableConfig.targetTable}")
-          truncateConn.commit()
-          logInfo(s"Truncated target table: ${tableConfig.targetSchema}.${tableConfig.targetTable}")
-        } finally {
-          truncateConn.close()
+          val truncateConn = connectionFactory.getConnection()
+          try {
+            val truncateStmt = truncateConn.createStatement()
+            truncateStmt.execute(s"TRUNCATE TABLE ${tableConfig.targetSchema}.${tableConfig.targetTable}")
+            truncateConn.commit()
+            logInfo(s"Truncated target table: ${tableConfig.targetSchema}.${tableConfig.targetTable}")
+          } finally {
+            truncateConn.close()
+          }
+        } catch {
+          case e: Exception =>
+            logWarn(s"Could not truncate target table (may not exist or may be empty): ${e.getMessage}")
         }
-      } catch {
-        case e: Exception =>
-          logWarn(s"Could not truncate target table (may not exist or may be empty): ${e.getMessage}")
+      } else {
+        logInfo(s"Skipping truncate for target table: ${tableConfig.targetSchema}.${tableConfig.targetTable}")
       }
       
       // Log run information

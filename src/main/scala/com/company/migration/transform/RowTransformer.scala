@@ -46,17 +46,11 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
         escapeCsvField(stringValue, isNull)
       }
       
-      // Add constant column values (already strings, just need to escape)
+      // Add constant column values (parse configured value and render for CSV)
       val constantValues = constantCols.map { constantCol =>
         val constantValue = tableConfig.constantColumns(constantCol)
-        // Constant values are provided as strings (e.g., "'CDM_MIGRATION'" or "12345")
-        // Remove outer quotes if present (they'll be added by escapeCsvField if needed)
-        val unquotedValue = if (constantValue.startsWith("'") && constantValue.endsWith("'") && constantValue.length > 1) {
-          constantValue.substring(1, constantValue.length - 1)
-        } else {
-          constantValue
-        }
-        escapeCsvField(unquotedValue, isNull = false)
+        val resolvedValue = resolveConstantValueForCsv(constantValue)
+        escapeCsvField(resolvedValue, isNull = false)
       }
       
       Some((sourceValues ++ constantValues).mkString(","))
@@ -187,11 +181,24 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
    */
   private def parseConstantValue(valueStr: String): Any = {
     val trimmed = valueStr.trim
+    if (isCurrentTimestampValue(trimmed)) {
+      return currentTimestamp()
+    }
     // Remove surrounding quotes if present
     if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length > 1) {
-      trimmed.substring(1, trimmed.length - 1)
+      val unquoted = trimmed.substring(1, trimmed.length - 1)
+      if (isCurrentTimestampValue(unquoted)) {
+        currentTimestamp()
+      } else {
+        unquoted
+      }
     } else if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length > 1) {
-      trimmed.substring(1, trimmed.length - 1)
+      val unquoted = trimmed.substring(1, trimmed.length - 1)
+      if (isCurrentTimestampValue(unquoted)) {
+        currentTimestamp()
+      } else {
+        unquoted
+      }
     } else if (trimmed.toLowerCase == "true") {
       true
     } else if (trimmed.toLowerCase == "false") {
@@ -214,6 +221,23 @@ class RowTransformer(tableConfig: TableConfig, targetColumns: List[String], sour
       // String (default)
       trimmed
     }
+  }
+
+  private def resolveConstantValueForCsv(valueStr: String): String = {
+    parseConstantValue(valueStr) match {
+      case ts: java.sql.Timestamp => ts.toString
+      case date: java.sql.Date => date.toString
+      case other => other.toString
+    }
+  }
+
+  private def isCurrentTimestampValue(valueStr: String): Boolean = {
+    val normalized = valueStr.trim.toUpperCase
+    normalized == "CURRENTTIMESTAMP" || normalized == "CURRENT_TIMESTAMP"
+  }
+
+  private def currentTimestamp(): java.sql.Timestamp = {
+    java.sql.Timestamp.from(java.time.Instant.now())
   }
 }
 

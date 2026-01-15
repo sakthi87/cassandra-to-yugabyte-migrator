@@ -45,3 +45,5 @@ derby.log
 # JAR files (build artifacts) - Commented out per user request
 # *.jar
 # !target/*.jar
+dist/
+target/

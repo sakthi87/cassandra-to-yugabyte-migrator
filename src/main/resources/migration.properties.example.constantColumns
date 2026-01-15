@@ -26,6 +26,7 @@ table.target.table=your_table
 # - String values should be provided without outer quotes (they'll be escaped automatically)
 # - Numeric values (INT, BIGINT, etc.) should be provided as numbers (no quotes)
 # - Boolean values: true or false (no quotes)
+# - For timestamp columns, use CURRENTTIMESTAMP or CURRENT_TIMESTAMP to auto-populate the current time
 #
 # Example 1: Basic audit fields
 table.constantColumns.names=created_by,migration_date,source_system
@@ -34,6 +35,10 @@ table.constantColumns.values=CDM_MIGRATION,2024-12-16,CASSANDRA_PROD
 # Example 2: With numeric and boolean values
 # table.constantColumns.names=migration_run_id,data_version,is_migrated
 # table.constantColumns.values=1702732800000,1,true
+
+# Example 2b: With current timestamp
+# table.constantColumns.names=migration_run_id,migration_ts
+# table.constantColumns.values=1702732800000,CURRENTTIMESTAMP
 
 # Example 3: With custom delimiter (if values contain commas)
 # table.constantColumns.names=migration_tags,migration_metadata
@@ -55,4 +60,6 @@ yugabyte.port=5433
 yugabyte.database=yugabyte
 yugabyte.username=yugabyte
 yugabyte.password=yugabyte
+# Truncate target table before migration (default: true)
+# yugabyte.truncateTargetTable=true
 
