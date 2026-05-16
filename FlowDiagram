@@ -1,0 +1,31 @@
+User / API
+   ↓
+OnPrem Cassandra (Source)
+   ↓
+200 OK (after local commit)
+   ↓
+Kafka → Flink
+   ↓
+Azure Cassandra (Target)
+
+-----------------------------------
+
+CDC (Validation Path)
+
+OnPrem Cassandra
+   ↓
+CDC (CommitLog / cdc_raw)
+   ↓
+CDC Agent
+   ↓
+CDC Kafka Events
+   ↓
+Reconciliation Engine
+   ↓
+Compare (writetime / deletes)
+   ↓
+Repair Topic
+   ↓
+Repair Worker (USING TIMESTAMP)
+   ↓
+Fix Azure Cassandra
