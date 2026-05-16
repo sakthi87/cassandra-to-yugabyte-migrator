@@ -29,3 +29,45 @@ Repair Topic
 Repair Worker (USING TIMESTAMP)
    ↓
 Fix Azure Cassandra
+
+
+
+
+
+
+flowchart LR
+
+%% =====================
+%% PRIMARY FLOW
+%% =====================
+
+U[User / API] --> OP[OnPrem Cassandra\nSOURCE OF TRUTH]
+
+OP --> OK[Return 200 OK after local commit]
+
+OK --> K[Kafka Producer]
+K --> KT[Kafka Topic (Partitioned by PK)]
+KT --> F[Flink Stream Processing]
+F --> AZ[Azure Cassandra TARGET\nUSING TIMESTAMP(source_writetime)]
+
+
+%% =====================
+%% CDC FLOW (SOURCE ONLY)
+%% =====================
+
+OP --> CDC0[CommitLog cdc_raw]
+
+CDC0 --> CDC1[CDC Agent]
+CDC1 --> CDC2[CDC Kafka Topic]
+
+CDC2 --> RECON[Reconciliation Engine]
+
+RECON --> CMP[Compare writetime / deletes / state]
+
+CMP --> DEC{Divergence?}
+
+DEC -->|Yes| RT[Repair Topic]
+RT --> RW[Repair Worker (USING TIMESTAMP)]
+RW --> AZ
+
+DEC -->|No| OK2[Metrics Only]
