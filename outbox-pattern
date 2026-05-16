@@ -1,0 +1,38 @@
+Here are all the references organised by audience — from authoritative industry sources down to practical implementation guides.
+
+Tier 1 — Authoritative / cite directly to director
+1. Chris Richardson — Microservices.io (the original definition)
+Chris Richardson formally documented the transactional outbox pattern in his Microservices.io pattern catalog. The pattern solves the exact problem of atomically updating a database and sending messages to a message broker without distributed transactions — guaranteeing that if the database transaction commits, the message will eventually be sent, and if it rolls back, nothing is sent.
+🔗 https://microservices.io/patterns/data/transactional-outbox.html Microservices.io
+
+2. Confluent (Apache Kafka's commercial company) — official course
+Confluent, the company behind Apache Kafka, teaches the transactional outbox pattern as part of their official microservices course. They describe it as one of the easiest ways to solve the dual-write problem — rather than updating the database and Kafka simultaneously, the transactional logic is pushed into the database using an outbox table, with a separate process asynchronously delivering events to Kafka.
+🔗 https://developer.confluent.io/courses/microservices/the-transactional-outbox-pattern/ Confluent
+
+3. AxonOps — Cassandra-specific implementation (directly relevant to your stack)
+AxonOps, which produces production-grade tooling specifically for Cassandra operations, documents the transactional outbox pattern adapted for Cassandra. They address Cassandra's lack of cross-partition transactions and describe the same-partition batching approach — exactly the design used in your implementation.
+🔗 https://axonops.com/docs/data-platforms/cassandra/application-development/patterns/outbox/ AxonOps
+
+4. Spring.io — official Spring/Kafka integration blog
+The official Spring Engineering blog covers the outbox pattern specifically in the context of Spring Cloud Stream and Apache Kafka, describing it as a pattern that achieves data integrity guarantees equivalent to a transactional system — without requiring distributed two-phase commits.
+🔗 https://spring.io/blog/2023/10/24/a-use-case-for-transactions-adapting-to-transactional-outbox-pattern/ Spring
+
+Tier 2 — Industry adoption references
+5. Uber, Netflix, Stripe — confirmed production users
+Companies like Uber, Netflix, and Stripe use variations of the transactional outbox pattern to keep their systems consistent at scale. The pattern directly solves the scenario where a database write succeeds but a Kafka publish fails — leaving downstream services out of sync with no way of knowing.
+🔗 https://singhajit.com/transactional-outbox-pattern/ Ajit Singh
+6. Uber specific — trip cancellation dual-write failure
+In Uber's early microservices migration, they encountered the classic dual-write problem: a rider cancels a trip, the database updates successfully, but the cancellation event fails to reach the driver app due to a network issue — leaving the driver still en route. Multiplied across millions of daily trips, this was systematic unreliability. Their solution evolved into patterns identical to the outbox.
+🔗 https://dev.to/igornosatov_15/the-outbox-pattern-a-love-letter-to-eventual-consistency-3ch3 DEV Community
+7. Stripe, PayPal, Uber, Lyft — financial and ride-sharing use cases
+In financial services like Stripe and PayPal, the outbox pattern guarantees that financial transactions are atomic with audit log events — ensuring regulatory compliance. In ride-sharing apps like Uber and Lyft, the pattern ensures that when a driver accepts a ride, the information is reliably delivered to matching and notification services even when message transmission fails.
+🔗 https://www.geeksforgeeks.org/system-design/outbox-pattern-for-reliable-messaging-system-design/ GeeksforGeeks
+
+Tier 3 — Practical implementation guides (share with your engineering team)
+8. Decodable — "Revisiting the Outbox Pattern" (2024, most current)
+A 2024 analysis confirms the outbox pattern remains the standard solution and that the outbox table should be treated as an append-only log — existing events are immutable and never updated after the fact. The article also confirms that Kafka partition key must be the entity ID to guarantee correct ordering of events for the same record.
+🔗 https://www.decodable.co/blog/revisiting-the-outbox-pattern Decodable
+9. Medium — Step-by-step with Kafka and Debezium (Dec 2024)
+🔗 https://medium.com/@cemdrman/a-step-by-step-guide-to-the-transactional-outbox-pattern-with-kafka
+10. Axual — Outbox with Apache Kafka patterns and tooling
+🔗 https://axual.com/blog/transactional-outbox-pattern-kafka
