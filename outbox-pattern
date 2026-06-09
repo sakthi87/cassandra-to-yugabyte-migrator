@@ -36,3 +36,53 @@ A 2024 analysis confirms the outbox pattern remains the standard solution and th
 🔗 https://medium.com/@cemdrman/a-step-by-step-guide-to-the-transactional-outbox-pattern-with-kafka
 10. Axual — Outbox with Apache Kafka patterns and tooling
 🔗 https://axual.com/blog/transactional-outbox-pattern-kafka
+
+
+
+### Business Case
+
+Enable approved internal consumers to access YugabyteDB directly where native database connectivity provides clear business value, such as PostgreSQL migrations, SQL-intensive workloads, and platform tooling, while continuing to position DataAPI as the preferred governance and integration layer for enterprise data access.
+
+---
+
+### Decision Context / Background Information
+
+YugabyteDB is currently exposed to internal consumers primarily through DataAPI, which provides centralized governance, security, connection management, auditing, and abstraction from the underlying database implementation.
+
+Several internal consumers have existing applications and APIs built directly against PostgreSQL databases and are planning to migrate to YugabyteDB to improve scalability, availability, and resiliency. Requiring these applications to be refactored to use DataAPI introduces significant development effort, extended delivery timelines, and additional migration risk. Additionally, certain platform and infrastructure tools (e.g., Apache Airflow, DBT, Flyway, Liquibase, reporting platforms, and metadata repositories) are designed to interact directly with databases and derive limited value from an intermediary API layer.
+
+To support broader YugabyteDB adoption and reduce migration complexity, a dual-access model is proposed:
+
+* **Direct YugabyteDB Access** for approved database-centric use cases.
+* **DataAPI Access** as the preferred model for governed business-domain integrations and shared data services.
+
+It is important to note that direct database access transfers certain operational responsibilities from the DataAPI platform to consuming teams. Teams utilizing direct access will be responsible for database account management (including LDAP provisioning where applicable), credential management, connection pooling, database driver maintenance, vulnerability remediation, connectivity resiliency, and adherence to platform security and operational standards. These capabilities are centrally managed when access is provided through DataAPI.
+
+---
+
+### Key Decision Criteria
+
+#### Approve Direct YugabyteDB Access When
+
+* Migrating existing PostgreSQL applications where minimizing code changes is a priority.
+* Native PostgreSQL compatibility is required to accelerate migration and adoption.
+* Workloads require complex SQL capabilities such as joins, aggregations, reporting, window functions, bulk processing, or transactional operations.
+* Platform, infrastructure, or metadata tools require direct database connectivity (e.g., Apache Airflow, DBT, Flyway, Liquibase, reporting tools, metadata repositories).
+* Low-latency database access is required and an additional API layer provides limited business value.
+* The consuming team is able to assume database-level operational and security responsibilities.
+
+#### Use DataAPI Access When
+
+* Data is shared across multiple teams, domains, or business capabilities.
+* Governance, auditing, authorization, and policy enforcement are primary requirements.
+* Stable API contracts and versioning are required.
+* Backend abstraction and future platform flexibility are desired.
+* Consumers should not be coupled to the underlying database schema.
+* Consumers are external-facing or broadly distributed across the enterprise.
+
+---
+
+### Architecture Principle
+
+**DataAPI remains the strategic and preferred access pattern for governed enterprise integrations and shared business capabilities. Direct YugabyteDB access is an approved access model for PostgreSQL migrations, SQL-intensive workloads, platform tooling, metadata repositories, and other database-centric use cases where a DataAPI layer provides limited value and introduces unnecessary implementation complexity.**
+
