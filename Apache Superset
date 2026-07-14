@@ -1,0 +1,433 @@
+For a **Red Hat Enterprise Linux (RHEL) deployment** with **16 CPU cores and 64 GB RAM**, you can size Superset as a more production-like analytics platform node rather than a simple POC VM.
+
+Given your architecture:
+
+* Kafka → event streaming
+* Apache Druid → analytics engine
+* Superset → visualization/self-service analytics
+* YugabyteDB → Superset metadata database
+
+Superset will not store analytical data; it mainly handles dashboard rendering, user management, metadata, and query orchestration. The additional capacity allows you to support multiple concurrent users and richer dashboards.
+
+---
+
+# 1. Superset Server Specification
+
+## Recommended VM
+
+| Resource   |                         Specification |
+| ---------- | ------------------------------------: |
+| OS         |                              RHEL 9.x |
+| CPU        |                               16 vCPU |
+| Memory     |                             64 GB RAM |
+| Network    |                   10 Gbps recommended |
+| Disk       |                            500 GB SSD |
+| Filesystem |                                   XFS |
+| Python     |                                  3.11 |
+| Deployment | Python virtual environment + Gunicorn |
+
+---
+
+# 2. Disk Layout Recommendation
+
+Separate application, logs, and temporary files.
+
+| Mount Point |   Size | Purpose                           |
+| ----------- | -----: | --------------------------------- |
+| `/`         |  50 GB | OS and system packages            |
+| `/opt`      | 100 GB | Superset installation             |
+| `/var/log`  |  50 GB | Application/system logs           |
+| `/tmp`      |  50 GB | Temporary processing              |
+| `/data`     | 250 GB | Superset assets, exports, backups |
+
+Example:
+
+```text
+/dev/mapper/rhel-root       50G   /
+/dev/mapper/rhel-opt       100G   /opt
+/dev/mapper/rhel-varlog     50G   /var/log
+/dev/mapper/rhel-tmp        50G   /tmp
+/dev/mapper/rhel-data      250G   /data
+```
+
+---
+
+# 3. Install Required RHEL Packages
+
+Login as root:
+
+```bash
+sudo dnf update -y
+```
+
+Install dependencies:
+
+```bash
+sudo dnf install -y \
+gcc \
+gcc-c++ \
+make \
+openssl-devel \
+libffi-devel \
+python3-devel \
+python3-pip \
+git \
+curl \
+wget \
+postgresql-devel \
+krb5-devel \
+cyrus-sasl-devel
+```
+
+Verify:
+
+```bash
+python3 --version
+pip3 --version
+```
+
+---
+
+# 4. Create Superset OS User
+
+```bash
+sudo useradd \
+-m \
+-d /opt/superset \
+-s /bin/bash \
+superset
+```
+
+Set password:
+
+```bash
+sudo passwd superset
+```
+
+Create directories:
+
+```bash
+sudo mkdir -p /data/superset
+
+sudo chown -R superset:superset /opt/superset
+sudo chown -R superset:superset /data/superset
+```
+
+---
+
+# 5. Create Python Virtual Environment
+
+Switch user:
+
+```bash
+su - superset
+```
+
+Create venv:
+
+```bash
+python3 -m venv /opt/superset/venv
+```
+
+Activate:
+
+```bash
+source /opt/superset/venv/bin/activate
+```
+
+Upgrade packages:
+
+```bash
+pip install --upgrade pip setuptools wheel
+```
+
+---
+
+# 6. Install Apache Superset
+
+```bash
+pip install apache-superset
+```
+
+Verify:
+
+```bash
+superset version
+```
+
+---
+
+# 7. Install Required Database Drivers
+
+## YugabyteDB YSQL Driver
+
+```bash
+pip install psycopg2-binary
+```
+
+## Apache Druid Driver
+
+```bash
+pip install pydruid
+```
+
+---
+
+# 8. Configure Superset
+
+Create:
+
+```bash
+vi /opt/superset/superset_config.py
+```
+
+Example:
+
+```python
+SQLALCHEMY_DATABASE_URI = (
+    "postgresql+psycopg2://"
+    "superset_user:<password>@"
+    "yb-master01.company.com:5433/"
+    "superset"
+)
+
+SECRET_KEY = "generate-a-long-random-secret"
+
+WTF_CSRF_ENABLED = True
+
+ROW_LIMIT = 50000
+
+SUPERSET_WEBSERVER_TIMEOUT = 300
+```
+
+---
+
+Set environment:
+
+```bash
+vi ~/.bash_profile
+```
+
+Add:
+
+```bash
+export SUPERSET_CONFIG_PATH=/opt/superset/superset_config.py
+```
+
+Reload:
+
+```bash
+source ~/.bash_profile
+```
+
+---
+
+# 9. Initialize Superset Metadata Database
+
+Run:
+
+```bash
+superset db upgrade
+```
+
+Create admin:
+
+```bash
+superset fab create-admin
+```
+
+Initialize:
+
+```bash
+superset init
+```
+
+---
+
+# 10. Gunicorn Configuration
+
+With 16 CPUs, use multiple workers.
+
+Recommended:
+
+```
+CPU = 16
+
+Gunicorn workers:
+2 × CPU + 1
+
+Maximum:
+33 workers
+```
+
+For Superset, don't oversubscribe because each worker consumes memory.
+
+Recommended starting point:
+
+```
+Workers: 8-12
+Threads: 4
+```
+
+Create:
+
+```bash
+mkdir -p /opt/superset/config
+
+vi /opt/superset/config/gunicorn_config.py
+```
+
+Add:
+
+```python
+bind = "0.0.0.0:8088"
+
+workers = 12
+
+threads = 4
+
+worker_class = "gthread"
+
+timeout = 300
+
+accesslog = "/var/log/superset/access.log"
+
+errorlog = "/var/log/superset/error.log"
+```
+
+---
+
+# 11. Create Systemd Service
+
+```bash
+sudo vi /etc/systemd/system/superset.service
+```
+
+Contents:
+
+```ini
+[Unit]
+Description=Apache Superset
+After=network.target
+
+
+[Service]
+
+User=superset
+Group=superset
+
+WorkingDirectory=/opt/superset
+
+Environment="SUPERSET_CONFIG_PATH=/opt/superset/superset_config.py"
+
+ExecStart=/opt/superset/venv/bin/gunicorn \
+-c /opt/superset/config/gunicorn_config.py \
+"superset.app:create_app()"
+
+Restart=always
+
+
+[Install]
+
+WantedBy=multi-user.target
+```
+
+---
+
+Enable:
+
+```bash
+sudo systemctl daemon-reload
+
+sudo systemctl enable superset
+
+sudo systemctl start superset
+```
+
+Check:
+
+```bash
+systemctl status superset
+```
+
+---
+
+# 12. Recommended RHEL Firewall
+
+Open Superset port:
+
+```bash
+sudo firewall-cmd \
+--permanent \
+--add-port=8088/tcp
+
+
+sudo firewall-cmd --reload
+```
+
+---
+
+# 13. Production Recommendation: Add Nginx
+
+For enterprise use:
+
+```text
+User
+ |
+HTTPS 443
+ |
+Nginx
+ |
+Gunicorn 8088
+ |
+Superset
+ |
+YugabyteDB
+```
+
+Benefits:
+
+* TLS termination
+* Authentication integration
+* Load balancing
+* Better security posture
+
+---
+
+# 14. Memory Allocation Guidance
+
+Your 64 GB RAM:
+
+| Component        |   Memory |
+| ---------------- | -------: |
+| OS               |     4 GB |
+| Superset workers | 24-32 GB |
+| Python overhead  |     8 GB |
+| Cache/temp       |     8 GB |
+| Buffer           |    12 GB |
+
+Your sizing is more than sufficient for:
+
+* 50–100 concurrent dashboard users
+* Multiple dashboards
+* SQL Lab usage
+* Druid queries
+* Scheduled reports (if Redis/Celery added later)
+
+---
+
+# 15. Future Additions
+
+For a full enterprise platform, add:
+
+| Component           | Purpose                   |
+| ------------------- | ------------------------- |
+| Redis               | Query cache               |
+| Celery workers      | Alerts/reports            |
+| Nginx               | HTTPS/load balancing      |
+| LDAP/OIDC           | Enterprise authentication |
+| Prometheus exporter | Superset monitoring       |
+
+---
+
+With your **16 CPU / 64 GB RHEL node**, I would treat this as the **shared analytics portal layer** of your Real-Time Analytics Platform. The next component I would design is the **Druid datasource model and Kafka ingestion specification**, because that determines how reusable your platform becomes for YugabyteDB, Cassandra, application logs, and future teams.
