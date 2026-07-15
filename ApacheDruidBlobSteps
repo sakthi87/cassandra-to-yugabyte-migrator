@@ -1,0 +1,367 @@
+Absolutely. Based on everything we've discussed, here's the architecture I'd recommend for your POC.
+
+## POC Architecture
+
+**Goal:**
+
+* ✅ Raw data stored in Azure Blob Storage
+* ✅ Druid reads data from Azure Blob Storage
+* ✅ Druid stores segments on the local filesystem (not Azure Blob)
+* ✅ YugabyteDB stores Druid metadata
+* ✅ ZooKeeper coordinates the cluster
+
+```text
+                   Azure Blob Storage
+                (CSV / JSON / Parquet)
+                         │
+                         ▼
+                  MiddleManager
+               (Reads Azure Blob)
+                         │
+                         ▼
+               Creates Druid Segments
+                         │
+                         ▼
+              Local Deep Storage (VM)
+          /opt/druid/var/druid/segments
+                         │
+                         ▼
+                 Historical Node
+              (Loads Local Segments)
+                         │
+                         ▼
+                      Broker
+                         │
+                         ▼
+                      Router
+                         │
+                         ▼
+                    SQL Client
+```
+
+---
+
+# Step 1 – Remove Azure Deep Storage Configuration
+
+Open
+
+```bash
+vi /opt/druid/conf/druid/cluster/_common/common.runtime.properties
+```
+
+Remove or comment out:
+
+```properties
+druid.storage.type=azure
+druid.azure.account=...
+druid.azure.container=...
+druid.azure.prefix=...
+```
+
+---
+
+# Step 2 – Configure Local Deep Storage
+
+Add:
+
+```properties
+druid.storage.type=local
+druid.storage.storageDirectory=/opt/druid/var/druid/segments
+```
+
+Create the directory on the machine that runs the MiddleManager:
+
+```bash
+mkdir -p /opt/druid/var/druid/segments
+
+chown -R druid:druid /opt/druid/var
+```
+
+---
+
+# Step 3 – Keep Azure Extension Enabled
+
+You still need the Azure extension because Druid will read files from Azure Blob Storage.
+
+In `common.runtime.properties`:
+
+```properties
+druid.extensions.loadList=[
+"druid-azure-extensions",
+"druid-postgresql-metadata-storage"
+]
+```
+
+---
+
+# Step 4 – Configure Azure Credentials
+
+Still in `common.runtime.properties`:
+
+```properties
+druid.azure.account=<storage-account-name>
+druid.azure.key=<storage-account-key>
+```
+
+Example:
+
+```properties
+druid.azure.account=druidstorage
+druid.azure.key=xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+These credentials are used only to access Azure Blob Storage as the input source.
+
+---
+
+# Step 5 – Restart the Cluster
+
+Restart the services in this order:
+
+1. ZooKeeper
+2. Coordinator
+3. Overlord
+4. Historical
+5. MiddleManager
+6. Broker
+7. Router
+
+Verify the Router UI is accessible:
+
+```text
+http://<router-ip>:8888
+```
+
+---
+
+# Step 6 – Upload Sample Data to Azure Blob
+
+Create a container:
+
+```text
+sales-data
+```
+
+Upload:
+
+```text
+sales.csv
+```
+
+Example CSV:
+
+```csv
+timestamp,city,sales
+2026-07-01T10:00:00Z,New York,100
+2026-07-01T11:00:00Z,Chicago,200
+2026-07-01T12:00:00Z,Dallas,150
+```
+
+Azure Blob layout:
+
+```text
+sales-data
+    |
+    └── sales.csv
+```
+
+---
+
+# Step 7 – Create the Ingestion Spec
+
+Create `sales-ingestion.json`:
+
+```json
+{
+  "type": "index_parallel",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "sales",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "iso"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "city"
+        ]
+      },
+      "metricsSpec": [
+        {
+          "type": "longSum",
+          "name": "sales",
+          "fieldName": "sales"
+        }
+      ],
+      "granularitySpec": {
+        "segmentGranularity": "DAY",
+        "queryGranularity": "HOUR",
+        "rollup": true
+      }
+    },
+    "ioConfig": {
+      "type": "index_parallel",
+      "inputSource": {
+        "type": "azure",
+        "container": "sales-data",
+        "paths": [
+          "sales.csv"
+        ]
+      },
+      "inputFormat": {
+        "type": "csv",
+        "findColumnsFromHeader": true
+      }
+    },
+    "tuningConfig": {
+      "type": "index_parallel"
+    }
+  }
+}
+```
+
+---
+
+# Step 8 – Submit the Ingestion Task
+
+Using the Overlord API:
+
+```bash
+curl -X POST \
+http://<overlord-ip>:8090/druid/indexer/v1/task \
+-H "Content-Type: application/json" \
+-d @sales-ingestion.json
+```
+
+Or use the Druid UI:
+
+* Open Router UI
+* Go to **Load Data**
+* Choose **JSON Spec**
+* Paste the ingestion spec
+* Submit
+
+---
+
+# Step 9 – Verify the Task
+
+Open:
+
+```text
+Router UI
+```
+
+Navigate to:
+
+```text
+Tasks
+```
+
+You should see:
+
+```text
+RUNNING
+```
+
+then:
+
+```text
+SUCCESS
+```
+
+---
+
+# Step 10 – Verify Local Segments
+
+On the VM running the MiddleManager/Historical:
+
+```bash
+ls -R /opt/druid/var/druid/segments
+```
+
+You should see a structure similar to:
+
+```text
+segments/
+└── sales
+    └── 2026-07-01T00:00:00.000Z_2026-07-02T00:00:00.000Z
+        ├── descriptor.json
+        └── index.zip
+```
+
+These are the Druid segments stored on the local filesystem.
+
+---
+
+# Step 11 – Verify the Datasource
+
+In the Druid UI, go to **Datasources**.
+
+You should see:
+
+```text
+sales
+```
+
+---
+
+# Step 12 – Run a SQL Query
+
+Open **Query** in the UI and run:
+
+```sql
+SELECT
+    city,
+    SUM(sales) AS total_sales
+FROM sales
+GROUP BY city
+ORDER BY total_sales DESC;
+```
+
+Expected output:
+
+| city     | total_sales |
+| -------- | ----------: |
+| Chicago  |         200 |
+| Dallas   |         150 |
+| New York |         100 |
+
+---
+
+# End-to-End Flow
+
+```text
+1. Upload sales.csv to Azure Blob
+             │
+             ▼
+2. Submit ingestion task
+             │
+             ▼
+3. Overlord schedules the task
+             │
+             ▼
+4. MiddleManager reads sales.csv from Azure Blob
+             │
+             ▼
+5. MiddleManager creates Druid segments
+             │
+             ▼
+6. Segments are stored on the local filesystem
+             │
+             ▼
+7. Historical loads the segments
+             │
+             ▼
+8. Broker executes SQL queries against the segments
+```
+
+## One recommendation before you start
+
+Your earlier deployment configured **4 VMs**, but for this POC you can simplify further:
+
+* **VM-1:** Coordinator + Overlord
+* **VM-2:** Router + Broker
+* **VM-3:** Historical + MiddleManager
+* **VM-4:** ZooKeeper
+
+That's a good balance between simplicity and demonstrating a realistic distributed Druid deployment. Once this POC is working, moving the deep storage from local disk to Azure Blob is primarily a configuration change rather than a change to your ingestion or query workflows.
