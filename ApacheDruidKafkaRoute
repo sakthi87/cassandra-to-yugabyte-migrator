@@ -1,0 +1,804 @@
+Absolutely. Since you've already built a 4-VM Druid cluster, Kafka is actually one of the most common ingestion sources for real-time analytics.
+
+For your POC, the architecture would look like this:
+
+```text
+                  Producer Application
+                         │
+                         ▼
+                     Apache Kafka
+                         │
+                         ▼
+                  Druid Supervisor
+                  (Overlord - VM-1)
+                         │
+               Creates Kafka Tasks
+                         │
+                         ▼
+            MiddleManager (VM-3)
+             Reads Kafka Messages
+                         │
+               Builds Druid Segments
+                         │
+                         ▼
+           Local Deep Storage (VM-3)
+                         │
+                         ▼
+              Historical (VM-3)
+                         │
+                         ▼
+                  Broker (VM-2)
+                         │
+                         ▼
+                 Router/UI (VM-2)
+```
+
+---
+
+# Prerequisites
+
+You already have:
+
+* ✅ Druid Cluster
+* ✅ ZooKeeper
+* ✅ YugabyteDB
+* ✅ Local Deep Storage
+
+Now add:
+
+* Apache Kafka
+
+---
+
+# VM Layout
+
+For a POC, you can install Kafka on a separate VM or on the ZooKeeper VM.
+
+Example:
+
+| VM   | Service                      |
+| ---- | ---------------------------- |
+| VM-1 | Coordinator + Overlord       |
+| VM-2 | Router + Broker              |
+| VM-3 | Historical + MiddleManager   |
+| VM-4 | ZooKeeper + Kafka (POC only) |
+
+For production, Kafka and ZooKeeper are typically on separate clusters.
+
+---
+
+# Step 1 - Install Kafka (VM-4)
+
+Download Kafka:
+
+```bash
+cd /opt
+
+wget https://downloads.apache.org/kafka/3.9.1/kafka_2.13-3.9.1.tgz
+
+tar -xzf kafka_2.13-3.9.1.tgz
+
+mv kafka_2.13-3.9.1 kafka
+```
+
+---
+
+# Step 2 - Configure Kafka
+
+Edit:
+
+```text
+/opt/kafka/config/server.properties
+```
+
+Set:
+
+```properties
+broker.id=1
+
+listeners=PLAINTEXT://0.0.0.0:9092
+
+advertised.listeners=PLAINTEXT://<VM4-IP>:9092
+
+log.dirs=/tmp/kafka-logs
+```
+
+If you're using Kafka in ZooKeeper mode (suitable for a POC), also set:
+
+```properties
+zookeeper.connect=<VM4-IP>:2181
+```
+
+---
+
+# Step 3 - Start Kafka (VM-4)
+
+Start the broker:
+
+```bash
+/opt/kafka/bin/kafka-server-start.sh \
+/opt/kafka/config/server.properties
+```
+
+Verify:
+
+```bash
+netstat -an | grep 9092
+```
+
+---
+
+# Step 4 - Create a Kafka Topic (VM-4)
+
+Create a topic:
+
+```bash
+/opt/kafka/bin/kafka-topics.sh \
+--create \
+--topic sales-topic \
+--bootstrap-server localhost:9092 \
+--partitions 1 \
+--replication-factor 1
+```
+
+Verify:
+
+```bash
+/opt/kafka/bin/kafka-topics.sh \
+--list \
+--bootstrap-server localhost:9092
+```
+
+Expected:
+
+```text
+sales-topic
+```
+
+---
+
+# Step 5 - Enable Kafka Extension (All Druid Nodes)
+
+Because the ingestion task can run on any MiddleManager and Druid components need to understand Kafka ingestion specs, enable the Kafka extension on **VM-1, VM-2, and VM-3**.
+
+Edit:
+
+```text
+/opt/druid/conf/druid/cluster/_common/common.runtime.properties
+```
+
+Update:
+
+```properties
+druid.extensions.loadList=[
+"druid-kafka-indexing-service",
+"druid-postgresql-metadata-storage"
+]
+```
+
+If you're also keeping Azure ingestion available:
+
+```properties
+druid.extensions.loadList=[
+"druid-kafka-indexing-service",
+"druid-azure-extensions",
+"druid-postgresql-metadata-storage"
+]
+```
+
+Restart the Druid services after updating the configuration.
+
+---
+
+# Step 6 - Verify Kafka Connectivity (VM-3)
+
+From the MiddleManager VM:
+
+```bash
+nc -vz <VM4-IP> 9092
+```
+
+Expected:
+
+```text
+Connection succeeded
+```
+
+---
+
+# Step 7 - Create a Kafka Supervisor
+
+Create `kafka-supervisor.json`:
+
+```json
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "sales_rt",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "iso"
+      },
+      "dimensionsSpec": {
+        "dimensions": [
+          "city"
+        ]
+      },
+      "metricsSpec": [
+        {
+          "type": "longSum",
+          "name": "sales",
+          "fieldName": "sales"
+        }
+      ],
+      "granularitySpec": {
+        "segmentGranularity": "DAY",
+        "queryGranularity": "MINUTE",
+        "rollup": true
+      }
+    },
+    "ioConfig": {
+      "topic": "sales-topic",
+      "inputFormat": {
+        "type": "json"
+      },
+      "consumerProperties": {
+        "bootstrap.servers": "<VM4-IP>:9092"
+      },
+      "taskCount": 1,
+      "replicas": 1
+    },
+    "tuningConfig": {
+      "type": "kafka"
+    }
+  }
+}
+```
+
+---
+
+# Step 8 - Submit the Supervisor (VM-1)
+
+Submit to the Overlord:
+
+```bash
+curl -X POST \
+http://<VM1-IP>:8090/druid/indexer/v1/supervisor \
+-H "Content-Type: application/json" \
+-d @kafka-supervisor.json
+```
+
+The Overlord creates the supervisor and assigns Kafka indexing tasks to the MiddleManager.
+
+---
+
+# Step 9 - Verify the Supervisor
+
+In the Druid UI:
+
+* Open **Supervisors**
+* Confirm the supervisor is **RUNNING**
+
+Also check **Tasks** to see active Kafka indexing tasks.
+
+---
+
+# Step 10 - Produce Sample Data (VM-4)
+
+Start a console producer:
+
+```bash
+/opt/kafka/bin/kafka-console-producer.sh \
+--topic sales-topic \
+--bootstrap-server localhost:9092
+```
+
+Send messages like:
+
+```json
+{"timestamp":"2026-07-15T10:00:00Z","city":"New York","sales":100}
+{"timestamp":"2026-07-15T10:01:00Z","city":"Chicago","sales":200}
+{"timestamp":"2026-07-15T10:02:00Z","city":"Dallas","sales":300}
+```
+
+---
+
+# Step 11 - Query Druid
+
+Wait a short time (depending on your Kafka ingestion settings), then run:
+
+```sql
+SELECT
+    city,
+    SUM(sales)
+FROM sales_rt
+GROUP BY city;
+```
+
+Expected:
+
+| city     | SUM(sales) |
+| -------- | ---------: |
+| New York |        100 |
+| Chicago  |        200 |
+| Dallas   |        300 |
+
+---
+
+# What each VM does
+
+| VM                                    | Responsibility                                                                                                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **VM-1 (Coordinator + Overlord)**     | Stores and manages the Kafka supervisor, schedules Kafka indexing tasks.                                                                                   |
+| **VM-2 (Router + Broker)**            | Receives SQL queries and routes them to Historical nodes.                                                                                                  |
+| **VM-3 (Historical + MiddleManager)** | MiddleManager consumes messages from Kafka, creates Druid segments, stores them in local deep storage. Historical loads those segments and serves queries. |
+| **VM-4 (ZooKeeper + Kafka)**          | Hosts the Kafka broker (and ZooKeeper in this POC) and stores the Kafka topic and messages.                                                                |
+
+## End-to-end flow
+
+```text
+Application
+     │
+     ▼
+Kafka Topic (VM-4)
+     │
+     ▼
+Overlord Supervisor (VM-1)
+     │
+     ▼
+MiddleManager (VM-3)
+     │
+Consumes JSON messages
+     │
+Creates Druid segments
+     │
+Stores segments locally
+     │
+Historical loads segments
+     │
+Broker executes SQL
+     │
+Router returns results
+```
+
+### One note about Kafka versions
+
+Current Kafka releases support both **KRaft mode** (without ZooKeeper) and **ZooKeeper mode** (legacy). Since your Druid cluster already includes a ZooKeeper VM, using Kafka in ZooKeeper mode is a straightforward choice for a POC. If you plan to build a production deployment on recent Kafka versions, I recommend using **KRaft mode** instead, as that's the direction Kafka is moving.
+
+
+
+------ Continous Data Flow-----
+
+
+For a good **real-time analytics POC**, you want to demonstrate this flow visually:
+
+```
+        Data Generator
+              |
+              |  (events every second)
+              ▼
+        Kafka Topic
+              |
+              |  (stream ingestion)
+              ▼
+        Druid MiddleManager
+              |
+              ▼
+        Druid Segments
+              |
+              ▼
+        Historical Nodes
+              |
+              ▼
+        Druid SQL Query
+              |
+              ▼
+     Dashboard (live metrics)
+```
+
+The easiest demo is:
+
+**Python event generator → Kafka → Druid → Grafana/Superset/Druid SQL UI**
+
+---
+
+# Step 1 — Create a Real-Time Event Generator
+
+On your Kafka VM (VM-4), create a Python producer.
+
+Install Kafka client:
+
+```bash
+pip3 install kafka-python
+```
+
+Create:
+
+```bash
+vi sales_generator.py
+```
+
+Add:
+
+```python
+from kafka import KafkaProducer
+import json
+import random
+import time
+from datetime import datetime, timezone
+
+producer = KafkaProducer(
+    bootstrap_servers=['<KAFKA_VM_IP>:9092'],
+    value_serializer=lambda x: json.dumps(x).encode('utf-8')
+)
+
+cities = [
+    "New York",
+    "Chicago",
+    "Dallas",
+    "Seattle",
+    "San Francisco"
+]
+
+while True:
+
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "city": random.choice(cities),
+        "sales": random.randint(10,500),
+        "transaction_id": random.randint(100000,999999)
+    }
+
+    producer.send(
+        "sales-topic",
+        event
+    )
+
+    print(event)
+
+    time.sleep(1)
+```
+
+This generates:
+
+```
+1 event / second
+```
+
+Example output:
+
+```
+{
+ timestamp: 2026-07-15T12:00:01Z,
+ city: Dallas,
+ sales: 250
+}
+```
+
+---
+
+# Step 2 — Start the Data Stream
+
+Run:
+
+```bash
+python3 sales_generator.py
+```
+
+You will see:
+
+```
+{'city':'Chicago','sales':120}
+{'city':'Dallas','sales':340}
+{'city':'Seattle','sales':90}
+```
+
+Now Kafka is continuously receiving data.
+
+---
+
+# Step 3 — Verify Kafka Messages
+
+Open another terminal:
+
+```bash
+kafka-console-consumer.sh \
+--topic sales-topic \
+--bootstrap-server <kafka-ip>:9092
+```
+
+You should see:
+
+```
+{
+"timestamp":"2026-07-15T12:01:01Z",
+"city":"Dallas",
+"sales":300
+}
+
+{
+"timestamp":"2026-07-15T12:01:02Z",
+"city":"Chicago",
+"sales":150
+}
+```
+
+---
+
+# Step 4 — Create Druid Kafka Supervisor
+
+Your supervisor should have:
+
+```json
+{
+"type":"kafka",
+
+"spec": {
+
+"dataSchema": {
+
+"dataSource":"sales_realtime",
+
+"timestampSpec":{
+"column":"timestamp",
+"format":"iso"
+},
+
+"dimensionsSpec":{
+"dimensions":[
+"city"
+]
+},
+
+"metricsSpec":[
+{
+"type":"longSum",
+"name":"total_sales",
+"fieldName":"sales"
+}
+],
+
+"granularitySpec":{
+"segmentGranularity":"MINUTE",
+"queryGranularity":"SECOND",
+"rollup":true
+}
+
+},
+
+"ioConfig":{
+
+"topic":"sales-topic",
+
+"inputFormat":{
+"type":"json"
+},
+
+"consumerProperties":{
+"bootstrap.servers":"<KAFKA_VM_IP>:9092"
+},
+
+"taskCount":1,
+
+"replicas":1
+
+}
+
+}
+}
+```
+
+Submit:
+
+```bash
+curl -X POST \
+http://<overlord-ip>:8090/druid/indexer/v1/supervisor \
+-H "Content-Type: application/json" \
+-d @sales-supervisor.json
+```
+
+---
+
+# Step 5 — Verify Druid Is Consuming
+
+Go to:
+
+```
+http://<router-ip>:8888
+```
+
+Check:
+
+```
+Supervisors
+```
+
+You should see:
+
+```
+sales_realtime
+
+RUNNING
+```
+
+Then:
+
+```
+Tasks
+```
+
+You should see:
+
+```
+index_kafka_sales_realtime
+
+RUNNING
+```
+
+---
+
+# Step 6 — Query Live Data
+
+In Druid SQL:
+
+```sql
+SELECT
+   city,
+   SUM(total_sales)
+FROM sales_realtime
+GROUP BY city;
+```
+
+You will see:
+
+```
+city             total_sales
+
+Dallas              54000
+Chicago             43000
+Seattle             21000
+```
+
+Wait 10 seconds and run again:
+
+```
+Dallas              56000
+Chicago             45000
+Seattle             22000
+```
+
+The numbers keep increasing.
+
+That is your real-time analytics demonstration.
+
+---
+
+# Step 7 — Show a Live Dashboard (Recommended)
+
+For a customer/demo presentation, don't show SQL repeatedly.
+
+Use:
+
+* Grafana
+* Apache Superset
+* Power BI
+* Tableau
+
+The dashboard query:
+
+```sql
+SELECT
+TIME_FLOOR(__time,'PT10S') AS time_bucket,
+SUM(sales) AS revenue
+FROM sales_realtime
+GROUP BY 1
+ORDER BY 1
+```
+
+Create:
+
+## Chart 1 — Revenue per 10 seconds
+
+```
+Revenue
+
+5000 |                 *
+4000 |             *
+3000 |        *
+2000 |    *
+1000 | *
+     -------------------
+      10 20 30 40 50 sec
+```
+
+---
+
+## Chart 2 — Sales by City
+
+SQL:
+
+```sql
+SELECT
+city,
+SUM(sales)
+FROM sales_realtime
+GROUP BY city
+```
+
+Display as:
+
+```
+Dallas          █████████
+Chicago         ██████
+Seattle         ████
+New York        ███
+```
+
+---
+
+# Step 8 — Show Latency
+
+For the POC, explain:
+
+```
+Event Created
+      |
+      | < 1 second
+      ▼
+Kafka
+      |
+      | few seconds
+      ▼
+Druid Segment
+      |
+      ▼
+SQL Query Result
+```
+
+Typical Druid Kafka ingestion latency:
+
+```
+2-10 seconds
+```
+
+depending on:
+
+* segment granularity
+* task settings
+* batch size
+
+---
+
+# VM Responsibility During This Demo
+
+| VM   | Component       | Role                            |
+| ---- | --------------- | ------------------------------- |
+| VM-1 | Overlord        | Creates Kafka ingestion tasks   |
+| VM-2 | Broker + Router | Executes queries and exposes UI |
+| VM-3 | MiddleManager   | Reads Kafka and builds segments |
+| VM-3 | Historical      | Serves real-time segments       |
+| VM-4 | Kafka           | Receives continuous events      |
+| VM-4 | Generator       | Produces fake transactions      |
+
+---
+
+# A good POC demo script
+
+For a customer demo:
+
+1. Start Python generator
+2. Open Kafka consumer → show incoming events
+3. Open Druid Supervisor page → show ingestion running
+4. Open Grafana dashboard
+5. Show numbers increasing every few seconds
+
+This clearly demonstrates:
+
+✅ Streaming ingestion
+✅ Kafka integration
+✅ Real-time indexing
+✅ Sub-second analytical queries
+✅ Live dashboards
+
+This is the standard Druid real-time analytics showcase pattern.
