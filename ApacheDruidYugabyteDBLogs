@@ -1,0 +1,437 @@
+Got it. You do **not** want to stream application/business data from YugabyteDB tables using CDC.
+
+You want:
+
+> **YugabyteDB server logs → Kafka → Druid → Grafana/Superset**
+
+For example:
+
+* database errors
+* slow queries
+* connection logs
+* transaction failures
+* audit events
+* node health events
+* latency metrics
+* operational events
+
+This is a **log analytics / observability POC**, not a data analytics CDC pipeline.
+
+The architecture changes slightly:
+
+```text
+              YugabyteDB Cluster
+              (3 Nodes)
+              
+        yb-node1   yb-node2   yb-node3
+            |          |          |
+            |          |          |
+        Server Logs  Server Logs  Server Logs
+            |          |          |
+            +----------+----------+
+                       |
+                       v
+              Log Collector
+          (Fluent Bit / Filebeat)
+                       |
+                       v
+                  Apache Kafka
+                       |
+              Topic: yugabyte-logs
+                       |
+                       v
+              Druid Kafka Ingestion
+                       |
+                       v
+             Druid Datasource
+              yb_server_logs
+                       |
+                       v
+          Grafana / Apache Superset
+```
+
+---
+
+# Step 1 — Identify YugabyteDB Log Location
+
+On each YugabyteDB node:
+
+```bash
+ps -ef | grep yb-tserver
+```
+
+You will see something like:
+
+```text
+--log_dir=/home/yugabyte/yb-data/tserver/logs
+```
+
+Example:
+
+```text
+/home/yugabyte/yb-data/tserver/logs/
+```
+
+Files:
+
+```text
+yb-tserver.INFO
+yb-tserver.WARNING
+yb-tserver.ERROR
+```
+
+Master logs:
+
+```text
+/home/yugabyte/yb-data/master/logs/
+```
+
+Example:
+
+```text
+yb-master.INFO
+```
+
+---
+
+# Step 2 — Install Fluent Bit on Yugabyte Nodes
+
+Install on:
+
+```
+yb-node1
+yb-node2
+yb-node3
+```
+
+Fluent Bit is lightweight and designed for log shipping.
+
+Example RHEL:
+
+```bash
+curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh
+```
+
+Verify:
+
+```bash
+fluent-bit --version
+```
+
+---
+
+# Step 3 — Configure Fluent Bit Input
+
+On each Yugabyte node:
+
+Edit:
+
+```bash
+/etc/fluent-bit/fluent-bit.conf
+```
+
+Add:
+
+```ini
+[INPUT]
+    Name tail
+    Path /home/yugabyte/yb-data/tserver/logs/yb-tserver.*
+    Tag yugabyte.tserver
+    Parser regex
+    DB /var/log/flb_yb.db
+    Mem_Buf_Limit 50MB
+```
+
+This continuously tails YugabyteDB logs.
+
+---
+
+# Step 4 — Parse Yugabyte Log Format
+
+Example Yugabyte log:
+
+```text
+I0715 10:32:01.123456 12345 rpc.cc:100] 
+Connection established
+```
+
+Create:
+
+```bash
+/etc/fluent-bit/parsers.conf
+```
+
+Add:
+
+```ini
+[PARSER]
+    Name yugabyte
+    Format regex
+    Regex ^(?<level>[A-Z])(?<date>[0-9]+)\s+(?<time>[0-9:]+)\s+(?<message>.*)
+```
+
+---
+
+# Step 5 — Send Logs to Kafka
+
+Add output:
+
+```ini
+[OUTPUT]
+    Name kafka
+    Match yugabyte.*
+    Brokers <kafka-ip>:9092
+    Topics yugabyte-logs
+```
+
+Restart:
+
+```bash
+systemctl restart fluent-bit
+```
+
+Now:
+
+```text
+Yugabyte Logs
+      |
+      |
+ Fluent Bit
+      |
+      |
+ Kafka
+```
+
+---
+
+# Step 6 — Create Kafka Topic
+
+On Kafka VM:
+
+```bash
+kafka-topics.sh \
+--create \
+--topic yugabyte-logs \
+--bootstrap-server <kafka-ip>:9092 \
+--partitions 3 \
+--replication-factor 1
+```
+
+Verify:
+
+```bash
+kafka-topics.sh \
+--list \
+--bootstrap-server <kafka-ip>:9092
+```
+
+Output:
+
+```
+yugabyte-logs
+```
+
+---
+
+# Step 7 — Verify Logs Enter Kafka
+
+Run:
+
+```bash
+kafka-console-consumer.sh \
+--topic yugabyte-logs \
+--bootstrap-server <kafka-ip>:9092
+```
+
+You should see:
+
+```json
+{
+"tag":"yugabyte.tserver",
+"message":"Connection established",
+"time":"10:32:01",
+"level":"I"
+}
+```
+
+---
+
+# Step 8 — Create Druid Kafka Supervisor
+
+Create datasource:
+
+```
+yugabyte_logs
+```
+
+Example supervisor:
+
+```json
+{
+"type":"kafka",
+
+"spec":
+{
+"dataSchema":
+{
+
+"dataSource":"yugabyte_logs",
+
+"timestampSpec":
+{
+"column":"timestamp",
+"format":"iso"
+},
+
+"dimensionsSpec":
+{
+"dimensions":
+[
+"node",
+"level",
+"message"
+]
+},
+
+"metricsSpec":
+[
+{
+"type":"count",
+"name":"log_count"
+}
+]
+
+},
+
+"ioConfig":
+{
+"topic":"yugabyte-logs",
+
+"inputFormat":
+{
+"type":"json"
+},
+
+"consumerProperties":
+{
+"bootstrap.servers":
+"<kafka-ip>:9092"
+}
+
+}
+
+}
+}
+```
+
+Submit:
+
+```bash
+curl -X POST \
+http://<overlord-ip>:8090/druid/indexer/v1/supervisor \
+-H "Content-Type: application/json" \
+-d @yb-log-supervisor.json
+```
+
+---
+
+# Step 9 — Create Dashboard Queries
+
+## Total Logs Over Time
+
+```sql
+SELECT
+TIME_FLOOR(__time,'PT1M') minute,
+COUNT(*) logs
+FROM yugabyte_logs
+GROUP BY 1
+ORDER BY 1
+```
+
+Dashboard:
+
+```
+10:01  █████
+10:02  ████████
+10:03  █████████████
+```
+
+---
+
+## Errors by Node
+
+```sql
+SELECT
+node,
+COUNT(*)
+FROM yugabyte_logs
+WHERE level='E'
+GROUP BY node
+```
+
+---
+
+## Top Error Messages
+
+```sql
+SELECT
+message,
+COUNT(*)
+FROM yugabyte_logs
+GROUP BY message
+ORDER BY COUNT(*) DESC
+LIMIT 10
+```
+
+---
+
+# Step 10 — Generate Test Events
+
+Create a failed connection or restart a Yugabyte service:
+
+Example:
+
+```bash
+systemctl restart yb-tserver
+```
+
+You should see:
+
+```
+Yugabyte log
+      |
+      v
+Fluent Bit
+      |
+      v
+Kafka
+      |
+      v
+Druid
+      |
+      v
+Grafana chart changes
+```
+
+---
+
+# VM Placement for Your Existing Environment
+
+| VM       | Component                        |
+| -------- | -------------------------------- |
+| YB-Node1 | Yugabyte + Fluent Bit            |
+| YB-Node2 | Yugabyte + Fluent Bit            |
+| YB-Node3 | Yugabyte + Fluent Bit            |
+| VM-4     | Kafka                            |
+| VM-1     | Druid Overlord                   |
+| VM-3     | Druid MiddleManager + Historical |
+| VM-2     | Grafana/Superset + Druid Broker  |
+
+---
+
+For a stronger enterprise demo, I would add **Prometheus + Grafana** for metrics and keep **Druid for log analytics**. Then you can demonstrate:
+
+* "Is the database healthy?" → Grafana/Prometheus
+* "Why did something fail?" → Druid log analytics
+
+That separation mirrors many production observability platforms.
