@@ -1,0 +1,116 @@
+{
+  "type": "kafka",
+  "spec": {
+    "dataSchema": {
+      "dataSource": "yugabyte_logs",
+
+      "timestampSpec": {
+        "column": "event_timestamp",
+        "format": "auto"
+      },
+
+      "dimensionsSpec": {
+        "dimensions": [
+          { "name": "component", "type": "string" },
+          { "name": "hostname", "type": "string" },
+          { "name": "environment", "type": "string" },
+          { "name": "cloud", "type": "string" },
+          { "name": "region", "type": "string" },
+          { "name": "availability_zone", "type": "string" },
+          { "name": "yugabyte_universe", "type": "string" },
+          { "name": "owner", "type": "string" },
+          { "name": "service", "type": "string" },
+          { "name": "source_file", "type": "string" },
+
+          { "name": "level", "type": "string" },
+          { "name": "monthday", "type": "string" },
+          { "name": "time", "type": "string" },
+          { "name": "pid", "type": "string" },
+          { "name": "source", "type": "string" },
+          { "name": "line", "type": "string" },
+
+          { "name": "audit", "type": "string" },
+          { "name": "timestamp", "type": "string" },
+          { "name": "appname", "type": "string" },
+          { "name": "username", "type": "string" },
+          { "name": "database", "type": "string" },
+          { "name": "clienthostport", "type": "string" },
+          { "name": "client_host", "type": "string" },
+          { "name": "client_port", "type": "string" },
+          { "name": "errorcode", "type": "string" },
+          { "name": "sessionid", "type": "string" },
+          { "name": "sessionstart", "type": "string" },
+          { "name": "vtransid", "type": "string" },
+          { "name": "transid", "type": "string" },
+
+          { "name": "message", "type": "string" }
+        ]
+      },
+
+      "metricsSpec": [
+        {
+          "type": "count",
+          "name": "count"
+        }
+      ],
+
+      "transformSpec": {
+        "transforms": [
+          {
+            "type": "expression",
+            "name": "client_host",
+            "expression": "regexp_extract(\"clienthostport\", '(.*):[0-9]+', 1)"
+          },
+          {
+            "type": "expression",
+            "name": "client_port",
+            "expression": "regexp_extract(\"clienthostport\", ':([0-9]+)', 1)"
+          }
+        ]
+      },
+
+      "granularitySpec": {
+        "type": "uniform",
+        "segmentGranularity": "HOUR",
+        "queryGranularity": "MINUTE",
+        "rollup": false
+      }
+    },
+
+    "ioConfig": {
+      "type": "kafka",
+
+      "topic": "yugabyte-logs",
+
+      "inputFormat": {
+        "type": "json"
+      },
+
+      "consumerProperties": {
+        "bootstrap.servers": "esslb-deltadev:443",
+        "security.protocol": "SSL",
+        "ssl.truststore.location": "/opt/druid/conf/kafka-truststore.jks",
+        "ssl.truststore.password": "REPLACE_ME"
+      },
+
+      "taskCount": 2,
+      "replicas": 1,
+      "taskDuration": "PT1H",
+
+      "useEarliestOffset": true
+    },
+
+    "tuningConfig": {
+      "type": "kafka",
+
+      "maxRowsInMemory": 200000,
+      "maxRowsPerSegment": 5000000,
+
+      "intermediatePersistPeriod": "PT10M",
+
+      "logParseExceptions": true,
+      "maxParseExceptions": 1000,
+      "maxSavedParseExceptions": 20
+    }
+  }
+}
